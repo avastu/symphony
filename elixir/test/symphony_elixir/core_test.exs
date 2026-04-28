@@ -13,7 +13,7 @@ defmodule SymphonyElixir.CoreTest do
 
     config = Config.settings!()
     assert config.polling.interval_ms == 30_000
-    assert config.tracker.active_states == ["Todo", "In Progress"]
+    assert config.tracker.active_states == ["Todo", "In Progress", "Human Review", "Rework", "Merging"]
     assert config.tracker.terminal_states == ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]
     assert config.tracker.assignee == nil
     assert config.agent.max_turns == 20
@@ -102,6 +102,8 @@ defmodule SymphonyElixir.CoreTest do
     assert is_binary(Map.get(tracker, "project_slug"))
     assert is_list(Map.get(tracker, "active_states"))
     assert is_list(Map.get(tracker, "terminal_states"))
+    assert "Human Review" in Map.get(tracker, "active_states")
+    assert "Human Review" not in Map.get(tracker, "terminal_states")
 
     hooks = Map.get(config, "hooks", %{})
     assert is_map(hooks)
@@ -244,7 +246,7 @@ defmodule SymphonyElixir.CoreTest do
     try do
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: test_root,
-        tracker_active_states: ["Todo", "In Progress", "In Review"],
+        tracker_active_states: ["Todo", "In Progress", "Human Review"],
         tracker_terminal_states: ["Closed", "Cancelled", "Canceled", "Duplicate"]
       )
 
@@ -307,7 +309,7 @@ defmodule SymphonyElixir.CoreTest do
     try do
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: test_root,
-        tracker_active_states: ["Todo", "In Progress", "In Review"],
+        tracker_active_states: ["Todo", "In Progress", "Human Review"],
         tracker_terminal_states: ["Closed", "Cancelled", "Canceled", "Duplicate"]
       )
 
@@ -371,7 +373,7 @@ defmodule SymphonyElixir.CoreTest do
       write_workflow_file!(Workflow.workflow_file_path(),
         tracker_kind: "memory",
         workspace_root: test_root,
-        tracker_active_states: ["Todo", "In Progress", "In Review"],
+        tracker_active_states: ["Todo", "In Progress", "Human Review"],
         tracker_terminal_states: ["Closed", "Cancelled", "Canceled", "Duplicate"],
         poll_interval_ms: 30_000
       )

@@ -359,7 +359,9 @@ Fields:
 - `project_slug` (string)
   - REQUIRED for dispatch when `tracker.kind == "linear"`.
 - `active_states` (list of strings)
-  - Default: `Todo`, `In Progress`
+  - Default: `Todo`, `In Progress`, `Human Review`, `Rework`, `Merging`
+  - `Human Review` is active so waiting gated tasks continue polling Linear and can resume
+    when an approval comment is posted.
 - `terminal_states` (list of strings)
   - Default: `Closed`, `Cancelled`, `Canceled`, `Duplicate`, `Done`
 
@@ -574,7 +576,7 @@ not require recognizing or validating extension fields unless that extension is 
 - `tracker.endpoint`: string, default `https://api.linear.app/graphql` when `tracker.kind=linear`
 - `tracker.api_key`: string or `$VAR`, canonical env `LINEAR_API_KEY` when `tracker.kind=linear`
 - `tracker.project_slug`: string, REQUIRED when `tracker.kind=linear`
-- `tracker.active_states`: list of strings, default `["Todo", "In Progress"]`
+- `tracker.active_states`: list of strings, default `["Todo", "In Progress", "Human Review", "Rework", "Merging"]`
 - `tracker.terminal_states`: list of strings, default `["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]`
 - `polling.interval_ms`: integer, default `30000`
 - `workspace.root`: path resolved to absolute, default `<system-temp>/symphony_workspaces`

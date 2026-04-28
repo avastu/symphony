@@ -5,6 +5,7 @@ tracker:
   active_states:
     - Todo
     - In Progress
+    - Human Review
     - Merging
     - Rework
   terminal_states:
@@ -108,10 +109,34 @@ The agent should be able to talk to Linear, either via a configured Linear MCP s
 - `Todo` -> queued; immediately transition to `In Progress` before active work.
   - Special case: if a PR is already attached, treat as feedback/rework loop (run full PR feedback sweep, address or explicitly push back, revalidate, return to `Human Review`).
 - `In Progress` -> implementation actively underway.
-- `Human Review` -> PR is attached and validated; waiting on human approval.
+- `Human Review` -> PR is attached and validated; waiting on human approval. Keep this state in `tracker.active_states` so approval comments can resume a waiting gated task.
 - `Merging` -> approved by human; execute the `land` skill flow (do not call `gh pr merge` directly).
 - `Rework` -> reviewer requested changes; planning + implementation required.
 - `Done` -> terminal state; no further action required.
+
+### Symphony-managed Linear status mapping
+
+Use these statuses for Symphony-managed work:
+
+| Linear status | Orchestrator role | Workpad state/phase |
+| --- | --- | --- |
+| `Backlog` | Out of automation scope; ignored. | N/A |
+| `Todo` | Queue entry; claim and immediately move to `In Progress`. | `working` / `intake` |
+| `In Progress` | Active scoping, planning, implementation, validation, or rework execution. | `working` / active phase |
+| `Human Review` | Validated PR or approval packet is waiting for Utsav; still polled so review comments and `Approved` commands resume the task. | `waiting_for_human` / review phase |
+| `Rework` | Human or reviewer requested changes after review. | `working` / `planning` or `implementation` |
+| `Merging` | Human approved and the agent should run the land flow. | `working` / `final_review` |
+| `Done` | Completed terminal state. | `done` / `done` |
+| `Canceled` / `Cancelled` / `Closed` / `Duplicate` | Terminal non-completion states; stop and clean up when appropriate. | `canceled`, `failed`, or `done` as recorded in the workpad |
+
+`tracker.active_states` must include `Todo`, `In Progress`, `Human Review`, `Rework`, and `Merging`. `Human Review` is intentionally active because the agent turn for that state polls Linear review activity and can continue when Utsav comments `Approved`, `Approved with change: ...`, `Skip approval`, or another accepted human command. Terminal states must stay out of `tracker.active_states`.
+
+Migration notes for a running control plane:
+
+- Create the Linear workflow statuses `Human Review`, `Rework`, and `Merging` in the team workflow before deploying this config. Keep `In Review` temporarily during migration if existing issues still use it.
+- Move Symphony-managed issues currently waiting in `In Review` to `Human Review`; issues with requested changes should move to `Rework`; approved issues ready to land should move to `Merging`.
+- Deploy the updated `WORKFLOW.md`, then restart or otherwise refresh the control plane so `tracker.active_states` includes `Human Review`. Runtime config is re-read during polling, but a restart is the clearest cutover for an actively running local control plane.
+- Verify the first migrated waiting issue is picked up by the orchestrator, reads the existing `## Codex Workpad`, and resumes from the approval/review comment rather than creating a new workpad.
 
 ## Step 0: Determine current ticket state and route
 

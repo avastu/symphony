@@ -558,6 +558,38 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert Orchestrator.should_dispatch_issue_for_test(issue, state)
   end
 
+  test "symphony workflow statuses remain dispatch-eligible while terminal states do not" do
+    state = %Orchestrator.State{
+      max_concurrent_agents: 3,
+      running: %{},
+      claimed: MapSet.new(),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{}
+    }
+
+    for status <- ["Human Review", "Rework", "Merging"] do
+      issue = %Issue{
+        id: "issue-#{status}",
+        identifier: "MT-#{System.unique_integer([:positive])}",
+        title: "#{status} work",
+        state: status
+      }
+
+      assert Orchestrator.should_dispatch_issue_for_test(issue, state)
+    end
+
+    for status <- ["Done", "Canceled", "Cancelled", "Closed", "Duplicate"] do
+      issue = %Issue{
+        id: "issue-#{status}",
+        identifier: "MT-#{System.unique_integer([:positive])}",
+        title: "#{status} work",
+        state: status
+      }
+
+      refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+    end
+  end
+
   test "dispatch revalidation skips stale todo issue once a non-terminal blocker appears" do
     stale_issue = %Issue{
       id: "blocked-2",
@@ -952,7 +984,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       max_concurrent_agents_by_state:
         todo: 1
         "In Progress": 4
-        "In Review": 2
+        "Human Review": 2
     ---
     """
 
@@ -961,7 +993,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert Config.settings!().agent.max_concurrent_agents == 10
     assert Config.max_concurrent_agents_for_state("Todo") == 1
     assert Config.max_concurrent_agents_for_state("In Progress") == 4
-    assert Config.max_concurrent_agents_for_state("In Review") == 2
+    assert Config.max_concurrent_agents_for_state("Human Review") == 2
     assert Config.max_concurrent_agents_for_state("Closed") == 10
     assert Config.max_concurrent_agents_for_state(:not_a_string) == 10
 
