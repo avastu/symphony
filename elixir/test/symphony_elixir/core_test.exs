@@ -111,6 +111,12 @@ defmodule SymphonyElixir.CoreTest do
     assert Map.get(hooks, "before_remove") =~ "cd elixir && mise exec -- mix workspace.before_remove"
 
     assert String.trim(prompt) != ""
+    assert prompt =~ "Treat a single persistent Linear comment as the source of truth for progress."
+    assert prompt =~ "Post a fresh concise Linear handoff comment only when work reaches a terminal handoff point"
+    assert prompt =~ "ready for human review, blocked, or complete"
+    assert prompt =~ "Do not post routine milestone comments."
+    assert prompt =~ "post exactly one fresh concise Linear handoff comment for this final outcome"
+    refute prompt =~ ~s(Do not post any additional completion summary comment.)
     assert is_binary(Config.workflow_prompt())
     assert Config.workflow_prompt() == prompt
   end

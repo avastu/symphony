@@ -81,7 +81,8 @@ The agent should be able to talk to Linear, either via a configured Linear MCP s
 - Reproduce first: always confirm the current behavior/issue signal before changing code so the fix target is explicit.
 - Keep ticket metadata current (state, checklist, acceptance criteria, links).
 - Treat a single persistent Linear comment as the source of truth for progress.
-- Use that single workpad comment for all progress and handoff notes; do not post separate "done"/summary comments.
+- Use that single workpad comment for execution progress, checklists, evidence, and the canonical handoff details.
+- Post a fresh concise Linear handoff comment only when work reaches a terminal handoff point: ready for human review, blocked, or complete. Do not post routine milestone comments.
 - Treat any ticket-authored `Validation`, `Test Plan`, or `Testing` section as non-negotiable acceptance input: mirror it in the workpad and execute it before considering the work complete.
 - When meaningful out-of-scope improvements are discovered during execution,
   file a separate Linear issue instead of expanding scope. The follow-up issue
@@ -191,7 +192,7 @@ Use this only when completion is blocked by missing required tools or missing au
   - what is missing,
   - why it blocks required acceptance/validation,
   - exact human action needed to unblock.
-- Keep the brief concise and action-oriented; do not add extra top-level comments outside the workpad.
+- Keep the workpad brief concise and action-oriented, then post one fresh concise blocker handoff comment with the same unblock action so the blocker is visible in Linear history.
 
 ## Step 2: Execution phase (Todo -> In Progress -> Human Review)
 
@@ -220,10 +221,11 @@ Use this only when completion is blocked by missing required tools or missing au
 9.  Merge latest `origin/main` into branch, resolve conflicts, and rerun checks.
 10. Update the workpad comment with final checklist status and validation notes.
     - Mark completed plan/acceptance/validation checklist items as checked.
-    - Add final handoff notes (commit + validation summary) in the same workpad comment.
+    - Add canonical final handoff notes (commit + validation summary) in the same workpad comment.
     - Do not include PR URL in the workpad comment; keep PR linkage on the issue via attachment/link fields.
     - Add a short `### Confusions` section at the bottom when any part of task execution was unclear/confusing, with concise bullets.
-    - Do not post any additional completion summary comment.
+    - After the workpad is fully current, post exactly one fresh concise Linear handoff comment for this final outcome. It should summarize status, commit/PR linkage status, validation, and any required reviewer or unblock action.
+    - Do not post additional milestone/progress comments before that final handoff comment.
 11. Before moving to `Human Review`, poll PR feedback and checks:
     - Read the PR `Manual QA Plan` comment (when present) and use it to sharpen UI/runtime test coverage for the current change.
     - Run the full PR feedback sweep protocol.
@@ -246,6 +248,7 @@ Use this only when completion is blocked by missing required tools or missing au
 4. If approved, human moves the issue to `Merging`.
 5. When the issue is in `Merging`, open and follow `.codex/skills/land/SKILL.md`, then run the `land` skill in a loop until the PR is merged. Do not call `gh pr merge` directly.
 6. After merge is complete, move the issue to `Done`.
+7. After the workpad reflects the merge result, post one fresh concise completion handoff comment with the merge/validation outcome.
 
 ## Step 4: Rework handling
 
@@ -276,6 +279,7 @@ Use this only when completion is blocked by missing required tools or missing au
 - If issue state is `Backlog`, do not modify it; wait for human to move to `Todo`.
 - Do not edit the issue body/description for planning or progress tracking.
 - Use exactly one persistent workpad comment (`## Codex Workpad`) per issue.
+- Keep the persistent workpad as the execution checklist and source of truth, but post one fresh concise final handoff comment when the issue becomes ready for human review, blocked, or complete.
 - If comment editing is unavailable in-session, use the update script. Only report blocked if both MCP editing and script-based editing are unavailable.
 - Temporary proof edits are allowed only for local verification and must be reverted before commit.
 - If out-of-scope improvements are found, create a separate Backlog issue rather
@@ -287,7 +291,7 @@ Use this only when completion is blocked by missing required tools or missing au
 - In `Human Review`, do not make changes; wait and poll.
 - If state is terminal (`Done`), do nothing and shut down.
 - Keep issue text concise, specific, and reviewer-oriented.
-- If blocked and no workpad exists yet, add one blocker comment describing blocker, impact, and next unblock action.
+- If blocked and no workpad exists yet, create the workpad first when possible, then post one fresh concise blocker handoff comment describing blocker, impact, and next unblock action.
 
 ## Workpad template
 
