@@ -1,0 +1,27 @@
+name: Local Symphony Redeploy
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: local-symphony-redeploy
+  cancel-in-progress: false
+
+jobs:
+  redeploy:
+    name: Redeploy local Symphony service
+    runs-on:
+      - self-hosted
+      - macOS
+      - symphony-redeploy
+    timeout-minutes: 15
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Redeploy
+        run: /Users/utsav/dev/symphony-control/scripts/redeploy-symphony
