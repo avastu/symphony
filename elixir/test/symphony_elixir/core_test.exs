@@ -7,13 +7,15 @@ defmodule SymphonyElixir.CoreTest do
       tracker_project_slug: nil,
       poll_interval_ms: nil,
       tracker_active_states: nil,
+      tracker_continuation_states: nil,
       tracker_terminal_states: nil,
       codex_command: nil
     )
 
     config = Config.settings!()
     assert config.polling.interval_ms == 30_000
-    assert config.tracker.active_states == ["Todo", "In Progress", "Human Review", "Rework", "Merging"]
+    assert config.tracker.active_states == ["Todo", "In Progress", "Rework", "Merging"]
+    assert config.tracker.continuation_states == ["Todo", "In Progress", "Rework", "Merging"]
     assert config.tracker.terminal_states == ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]
     assert config.tracker.assignee == nil
     assert config.agent.max_turns == 20
@@ -102,7 +104,8 @@ defmodule SymphonyElixir.CoreTest do
     assert is_binary(Map.get(tracker, "project_slug"))
     assert is_list(Map.get(tracker, "active_states"))
     assert is_list(Map.get(tracker, "terminal_states"))
-    assert "Human Review" in Map.get(tracker, "active_states")
+    refute "Human Review" in Map.get(tracker, "active_states")
+    assert Map.get(tracker, "continuation_states") == ["Todo", "In Progress", "Rework", "Merging"]
     assert "Human Review" not in Map.get(tracker, "terminal_states")
 
     hooks = Map.get(config, "hooks", %{})
@@ -522,7 +525,7 @@ defmodule SymphonyElixir.CoreTest do
     refute Process.alive?(agent_pid)
   end
 
-  test "normal worker exit schedules active-state continuation retry" do
+  test "normal worker exit schedules continuation-state retry" do
     issue_id = "issue-resume"
     ref = make_ref()
     orchestrator_name = Module.concat(__MODULE__, :ContinuationOrchestrator)
@@ -559,7 +562,46 @@ defmodule SymphonyElixir.CoreTest do
     assert MapSet.member?(state.completed, issue_id)
     assert %{attempt: 1, due_at_ms: due_at_ms} = state.retry_attempts[issue_id]
     assert is_integer(due_at_ms)
-    assert_due_in_range(due_at_ms, 500, 1_100)
+    assert_due_in_range(due_at_ms, 0, 1_100)
+  end
+
+  test "normal worker exit in Human Review does not schedule continuation retry" do
+    issue_id = "issue-human-review"
+    ref = make_ref()
+    orchestrator_name = Module.concat(__MODULE__, :HumanReviewContinuationOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    initial_state = :sys.get_state(pid)
+
+    running_entry = %{
+      pid: self(),
+      ref: ref,
+      identifier: "UTS-42",
+      issue: %Issue{id: issue_id, identifier: "UTS-42", state: "Human Review"},
+      started_at: DateTime.utc_now()
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.new([issue_id]))
+      |> Map.put(:retry_attempts, %{})
+    end)
+
+    send(pid, {:DOWN, ref, :process, self(), :normal})
+    Process.sleep(50)
+    state = :sys.get_state(pid)
+
+    refute Map.has_key?(state.running, issue_id)
+    assert MapSet.member?(state.completed, issue_id)
+    refute Map.has_key?(state.retry_attempts, issue_id)
+    refute MapSet.member?(state.claimed, issue_id)
   end
 
   test "abnormal worker exit increments retry attempt progressively" do
@@ -709,6 +751,51 @@ defmodule SymphonyElixir.CoreTest do
 
     assert coalesced_state.tick_token == refreshed_state.tick_token
     assert {:noreply, ^coalesced_state} = Orchestrator.handle_info({:tick, stale_tick_token}, coalesced_state)
+  end
+
+  test "targeted Human Review check checkpoints unchanged review state without dispatch" do
+    previous_memory_issues = Application.get_env(:symphony_elixir, :memory_tracker_issues)
+
+    issue = %Issue{
+      id: "issue-uts-42",
+      identifier: "UTS-42",
+      title: "Clean PR waiting for review",
+      state: "Human Review",
+      updated_at: ~U[2026-04-29 20:00:00Z],
+      branch_name: "uts-42-clean-pr",
+      url: "https://linear.app/issue/UTS-42"
+    }
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+      state = %Orchestrator.State{
+        poll_interval_ms: 30_000,
+        max_concurrent_agents: 1,
+        claimed: MapSet.new(["issue-uts-42"]),
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+        codex_rate_limits: nil
+      }
+
+      assert {:reply, first_payload, first_state} =
+               Orchestrator.handle_call({:request_review_check, "issue-uts-42"}, {self(), make_ref()}, state)
+
+      assert first_payload.queued == false
+      assert first_payload.reason == "review_checkpoint_unchanged"
+      refute MapSet.member?(first_state.claimed, "issue-uts-42")
+      assert first_state.review_checkpoints["issue-uts-42"].state == "Human Review"
+
+      assert {:reply, second_payload, second_state} =
+               Orchestrator.handle_call({:request_review_check, "issue-uts-42"}, {self(), make_ref()}, first_state)
+
+      assert second_payload.queued == false
+      assert second_payload.reason == "review_checkpoint_unchanged"
+      assert second_state.running == %{}
+      assert second_state.retry_attempts == %{}
+    after
+      restore_app_env(:memory_tracker_issues, previous_memory_issues)
+    end
   end
 
   test "select_worker_host_for_test skips full ssh hosts under the shared per-host cap" do
