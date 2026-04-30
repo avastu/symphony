@@ -1120,7 +1120,7 @@ defmodule SymphonyElixir.Orchestrator do
           turn_count: Map.get(metadata, :turn_count, 0),
           started_at: metadata.started_at,
           last_codex_timestamp: metadata.last_codex_timestamp,
-          last_codex_message: metadata.last_codex_message,
+          last_codex_message: StatusDashboard.humanize_codex_message(metadata.last_codex_message),
           last_codex_event: metadata.last_codex_event,
           runtime_seconds: running_seconds(metadata.started_at, now)
         }
