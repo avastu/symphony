@@ -25,8 +25,8 @@ defmodule SymphonyElixirWeb.ObservabilityApiController do
   end
 
   @spec refresh(Conn.t(), map()) :: Conn.t()
-  def refresh(conn, _params) do
-    case Presenter.refresh_payload(orchestrator()) do
+  def refresh(conn, params) do
+    case Presenter.refresh_payload(orchestrator(), params) do
       {:ok, payload} ->
         conn
         |> put_status(202)

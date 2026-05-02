@@ -49,9 +49,18 @@ defmodule SymphonyElixirWeb.Presenter do
     end
   end
 
-  @spec refresh_payload(GenServer.name()) :: {:ok, map()} | {:error, :unavailable}
-  def refresh_payload(orchestrator) do
-    case Orchestrator.request_refresh(orchestrator) do
+  @spec refresh_payload(GenServer.name(), map()) :: {:ok, map()} | {:error, :unavailable}
+  def refresh_payload(orchestrator, params \\ %{}) do
+    request =
+      case Map.get(params, "issue_id") do
+        issue_id when is_binary(issue_id) and issue_id != "" ->
+          Orchestrator.request_review_check(orchestrator, issue_id)
+
+        _ ->
+          Orchestrator.request_refresh(orchestrator)
+      end
+
+    case request do
       :unavailable ->
         {:error, :unavailable}
 

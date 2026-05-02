@@ -359,9 +359,12 @@ Fields:
 - `project_slug` (string)
   - REQUIRED for dispatch when `tracker.kind == "linear"`.
 - `active_states` (list of strings)
-  - Default: `Todo`, `In Progress`, `Human Review`, `Rework`, `Merging`
-  - `Human Review` is active so waiting gated tasks continue polling Linear and can resume
-    when an approval comment is posted.
+  - Default: `Todo`, `In Progress`, `Rework`, `Merging`
+  - Stable review states such as `Human Review` are intentionally excluded from normal active polling.
+- `continuation_states` (list of strings)
+  - Default: `Todo`, `In Progress`, `Rework`, `Merging`
+  - States that may automatically chain in-process turns or schedule continuation retries after a
+    normal worker exit.
 - `terminal_states` (list of strings)
   - Default: `Closed`, `Cancelled`, `Canceled`, `Duplicate`, `Done`
 
@@ -576,7 +579,8 @@ not require recognizing or validating extension fields unless that extension is 
 - `tracker.endpoint`: string, default `https://api.linear.app/graphql` when `tracker.kind=linear`
 - `tracker.api_key`: string or `$VAR`, canonical env `LINEAR_API_KEY` when `tracker.kind=linear`
 - `tracker.project_slug`: string, REQUIRED when `tracker.kind=linear`
-- `tracker.active_states`: list of strings, default `["Todo", "In Progress", "Human Review", "Rework", "Merging"]`
+- `tracker.active_states`: list of strings, default `["Todo", "In Progress", "Rework", "Merging"]`
+- `tracker.continuation_states`: list of strings, default `["Todo", "In Progress", "Rework", "Merging"]`
 - `tracker.terminal_states`: list of strings, default `["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]`
 - `polling.interval_ms`: integer, default `30000`
 - `workspace.root`: path resolved to absolute, default `<system-temp>/symphony_workspaces`
@@ -629,14 +633,14 @@ Important nuance:
 - A successful worker exit does not mean the issue is done forever.
 - The worker MAY continue through multiple back-to-back coding-agent turns before it exits.
 - After each normal turn completion, the worker re-checks the tracker issue state.
-- If the issue is still in an active state, the worker SHOULD start another turn on the same live
+- If the issue is still in a continuation state, the worker SHOULD start another turn on the same live
   coding-agent thread in the same workspace, up to `agent.max_turns`.
 - The first turn SHOULD use the full rendered task prompt.
 - Continuation turns SHOULD send only continuation guidance to the existing thread, not resend the
   original task prompt that is already present in thread history.
-- Once the worker exits normally, the orchestrator still schedules a short continuation retry
-  (about 1 second) so it can re-check whether the issue remains active and needs another worker
-  session.
+- Once the worker exits normally from a continuation state, the orchestrator still schedules a short
+  continuation retry (about 1 second) so it can re-check whether the issue remains continuable and
+  needs another worker session.
 
 ### 7.2 Run Attempt Lifecycle
 
@@ -668,7 +672,7 @@ Distinct terminal reasons are important because retry logic and logs differ.
   - Remove running entry.
   - Update aggregate runtime totals.
   - Schedule continuation retry (attempt `1`) after the worker exhausts or finishes its in-process
-    turn loop.
+    turn loop only when the last known issue state is in `tracker.continuation_states`.
 
 - `Worker Exit (abnormal)`
   - Remove running entry.
@@ -1987,7 +1991,8 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - Non-active state stops running agent without workspace cleanup
 - Terminal state stops running agent and cleans workspace
 - Reconciliation with no running issues is a no-op
-- Normal worker exit schedules a short continuation retry (attempt 1)
+- Normal worker exit in a continuation state schedules a short continuation retry (attempt 1)
+- Normal worker exit in `Human Review` releases the claim without scheduling continuation retry
 - Abnormal worker exit increments retries with 10s-based exponential backoff
 - Retry backoff cap uses configured `agent.max_retry_backoff_ms`
 - Retry queue entries include attempt, due time, identifier, and error

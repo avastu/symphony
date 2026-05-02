@@ -558,7 +558,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert Orchestrator.should_dispatch_issue_for_test(issue, state)
   end
 
-  test "symphony workflow statuses remain dispatch-eligible while terminal states do not" do
+  test "symphony workflow implementation statuses remain dispatch-eligible while review and terminal states do not" do
     state = %Orchestrator.State{
       max_concurrent_agents: 3,
       running: %{},
@@ -567,7 +567,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       retry_attempts: %{}
     }
 
-    for status <- ["Human Review", "Rework", "Merging"] do
+    for status <- ["Rework", "Merging"] do
       issue = %Issue{
         id: "issue-#{status}",
         identifier: "MT-#{System.unique_integer([:positive])}",
@@ -577,6 +577,15 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
       assert Orchestrator.should_dispatch_issue_for_test(issue, state)
     end
+
+    issue = %Issue{
+      id: "issue-Human Review",
+      identifier: "MT-#{System.unique_integer([:positive])}",
+      title: "Human Review work",
+      state: "Human Review"
+    }
+
+    refute Orchestrator.should_dispatch_issue_for_test(issue, state)
 
     for status <- ["Done", "Canceled", "Cancelled", "Closed", "Duplicate"] do
       issue = %Issue{

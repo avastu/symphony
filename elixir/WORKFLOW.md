@@ -5,9 +5,13 @@ tracker:
   active_states:
     - Todo
     - In Progress
-    - Human Review
-    - Merging
     - Rework
+    - Merging
+  continuation_states:
+    - Todo
+    - In Progress
+    - Rework
+    - Merging
   terminal_states:
     - Closed
     - Cancelled
@@ -126,7 +130,7 @@ The agent should be able to talk to Linear, either via a configured Linear MCP s
 - `Todo` -> queued; immediately transition to `In Progress` before active work.
   - Special case: if a PR is already attached, treat as feedback/rework loop (run full PR feedback sweep, address or explicitly push back, revalidate, return to `Human Review`).
 - `In Progress` -> implementation actively underway.
-- `Human Review` -> PR is attached and validated; waiting on human approval. Keep this state in `tracker.active_states` so approval comments can resume a waiting gated task.
+- `Human Review` -> PR is attached and validated; waiting on human approval or review/check events. This state is not continuously polled by the normal active loop.
 - `Merging` -> approved by human; execute the `land` skill flow (do not call `gh pr merge` directly).
 - `Rework` -> reviewer requested changes; planning + implementation required.
 - `Done` -> terminal state; no further action required.
@@ -140,20 +144,20 @@ Use these statuses for Symphony-managed work:
 | `Backlog` | Out of automation scope; ignored. | N/A |
 | `Todo` | Queue entry; claim and immediately move to `In Progress`. | `working` / `intake` |
 | `In Progress` | Active scoping, planning, implementation, validation, or rework execution. | `working` / active phase |
-| `Human Review` | Validated PR or approval packet is waiting for Utsav; still polled so review comments and `Approved` commands resume the task. | `waiting_for_human` / review phase |
+| `Human Review` | Validated PR or approval packet is waiting for Utsav; event/checkpoint-driven review checks may resume the task on material Linear or GitHub changes. | `waiting_for_human` / review phase |
 | `Rework` | Human or reviewer requested changes after review. | `working` / `planning` or `implementation` |
 | `Merging` | Human approved and the agent should run the land flow. | `working` / `final_review` |
 | `Done` | Completed terminal state. | `done` / `done` |
 | `Canceled` / `Cancelled` / `Closed` / `Duplicate` | Terminal non-completion states; stop and clean up when appropriate. | `canceled`, `failed`, or `done` as recorded in the workpad |
 
-`tracker.active_states` must include `Todo`, `In Progress`, `Human Review`, `Rework`, and `Merging`. `Human Review` is intentionally active because the agent turn for that state polls Linear review activity and can continue when Utsav comments `Approved`, `Approved with change: ...`, `Skip approval`, or another accepted human command. Terminal states must stay out of `tracker.active_states`.
+`tracker.active_states` must include `Todo`, `In Progress`, `Rework`, and `Merging`; it must not include stable review states such as `Human Review` or legacy `In Review`. `tracker.continuation_states` should match the implementation states that may chain or retry automatically: `Todo`, `In Progress`, `Rework`, and `Merging`. Human approval, review comments, PR check transitions, review-thread changes, and PR head changes should wake a one-shot review/checkpoint path instead of the normal active polling loop. Terminal states must stay out of both lists.
 
 Migration notes for a running control plane:
 
 - Create the Linear workflow statuses `Human Review`, `Rework`, and `Merging` in the team workflow before deploying this config. Keep `In Review` temporarily during migration if existing issues still use it.
 - Move Symphony-managed issues currently waiting in `In Review` to `Human Review`; issues with requested changes should move to `Rework`; approved issues ready to land should move to `Merging`.
-- Deploy the updated `WORKFLOW.md`, then restart or otherwise refresh the control plane so `tracker.active_states` includes `Human Review`. Runtime config is re-read during polling, but a restart is the clearest cutover for an actively running local control plane.
-- Verify the first migrated waiting issue is picked up by the orchestrator, reads the existing `## Codex Workpad`, and resumes from the approval/review comment rather than creating a new workpad.
+- Deploy the updated `WORKFLOW.md`, then restart or otherwise refresh the control plane so `tracker.active_states` excludes `Human Review`. Runtime config is re-read during polling, but a restart is the clearest cutover for an actively running local control plane.
+- Verify the first migrated waiting issue remains quiet in `Human Review` until a supported human/review/check threshold changes or an operator forces a targeted one-shot review check.
 
 ## Step 0: Determine current ticket state and route
 
@@ -164,7 +168,7 @@ Migration notes for a running control plane:
    - `Todo` -> immediately move to `In Progress`, then ensure bootstrap workpad comment exists (create if missing), then start execution flow.
      - If PR is already attached, start by reviewing all open PR comments and deciding required changes vs explicit pushback responses.
    - `In Progress` -> continue execution flow from current scratchpad comment.
-   - `Human Review` -> wait and poll for decision/review updates.
+   - `Human Review` -> wait for event/checkpoint wakeups; do not enter the normal active polling loop.
    - `Merging` -> on entry, open and follow `.codex/skills/land/SKILL.md`; do not call `gh pr merge` directly.
    - `Rework` -> run rework flow.
    - `Done` -> do nothing and shut down.
@@ -284,8 +288,8 @@ Use this only when completion is blocked by missing required tools or missing au
 
 ## Step 3: Human Review and merge handling
 
-1. When the issue is in `Human Review`, do not code or change ticket content.
-2. Poll for updates as needed, including GitHub PR review comments from humans and bots.
+1. When the issue is in `Human Review`, do not code or change ticket content unless a supported review/check threshold moves the issue to `Rework`/`Merging` or triggers a one-shot review-check turn.
+2. Do not repeatedly poll Linear comments for stable `Human Review` issues. Resume only on meaningful changes such as a new Utsav comment, state transition to `Rework` or `Merging`, PR checks completing, new unresolved review feedback, check annotations, or PR head SHA changes.
 3. If review feedback requires changes, move the issue to `Rework` and follow the rework flow.
 4. If approved, human moves the issue to `Merging`.
 5. When the issue is in `Merging`, open and follow `.codex/skills/land/SKILL.md`, then run the `land` skill in a loop until the PR is merged. Do not call `gh pr merge` directly.
@@ -330,7 +334,7 @@ Use this only when completion is blocked by missing required tools or missing au
   link to the current issue, and `blockedBy` when the follow-up depends on the
   current issue.
 - Do not move to `Human Review` unless the `Completion bar before Human Review` is satisfied.
-- In `Human Review`, do not make changes; wait and poll.
+- In `Human Review`, do not make changes; wait for human or review/check events.
 - If state is terminal (`Done`), do nothing and shut down.
 - Keep issue text concise, specific, and reviewer-oriented.
 - If blocked and no workpad exists yet, create the workpad first when possible, then post one fresh concise blocker handoff comment describing blocker, impact, and next unblock action.

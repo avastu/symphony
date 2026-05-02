@@ -37,6 +37,7 @@ defmodule SymphonyElixir.Orchestrator do
       completed: MapSet.new(),
       claimed: MapSet.new(),
       retry_attempts: %{},
+      review_checkpoints: %{},
       codex_totals: nil,
       codex_rate_limits: nil
     ]
@@ -129,32 +130,7 @@ defmodule SymphonyElixir.Orchestrator do
         state = record_session_completion_totals(state, running_entry)
         session_id = running_entry_session_id(running_entry)
 
-        state =
-          case reason do
-            :normal ->
-              Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling active-state continuation check")
-
-              state
-              |> complete_issue(issue_id)
-              |> schedule_issue_retry(issue_id, 1, %{
-                identifier: running_entry.identifier,
-                delay_type: :continuation,
-                worker_host: Map.get(running_entry, :worker_host),
-                workspace_path: Map.get(running_entry, :workspace_path)
-              })
-
-            _ ->
-              Logger.warning("Agent task exited for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}; scheduling retry")
-
-              next_attempt = next_retry_attempt_from_running(running_entry)
-
-              schedule_issue_retry(state, issue_id, next_attempt, %{
-                identifier: running_entry.identifier,
-                error: "agent exited: #{inspect(reason)}",
-                worker_host: Map.get(running_entry, :worker_host),
-                workspace_path: Map.get(running_entry, :workspace_path)
-              })
-          end
+        state = handle_agent_down_reason(state, issue_id, running_entry, session_id, reason)
 
         Logger.info("Agent task finished for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}")
 
@@ -657,6 +633,19 @@ defmodule SymphonyElixir.Orchestrator do
     |> MapSet.new()
   end
 
+  defp continuation_state_set do
+    Config.settings!().tracker.continuation_states
+    |> Enum.map(&normalize_issue_state/1)
+    |> Enum.filter(&(&1 != ""))
+    |> MapSet.new()
+  end
+
+  defp continuation_issue_state?(state_name, continuation_states) when is_binary(state_name) do
+    MapSet.member?(continuation_states, normalize_issue_state(state_name))
+  end
+
+  defp continuation_issue_state?(_state_name, _continuation_states), do: false
+
   defp dispatch_issue(%State{} = state, issue, attempt \\ nil, preferred_worker_host \\ nil) do
     case revalidate_issue_for_dispatch(issue, &Tracker.fetch_issue_states_by_ids/1, terminal_state_set()) do
       {:ok, %Issue{} = refreshed_issue} ->
@@ -803,6 +792,8 @@ defmodule SymphonyElixir.Orchestrator do
             due_at_ms: due_at_ms,
             identifier: identifier,
             error: error,
+            delay_type: metadata[:delay_type],
+            last_state: metadata[:last_state],
             worker_host: worker_host,
             workspace_path: workspace_path
           })
@@ -815,6 +806,8 @@ defmodule SymphonyElixir.Orchestrator do
         metadata = %{
           identifier: Map.get(retry_entry, :identifier),
           error: Map.get(retry_entry, :error),
+          delay_type: Map.get(retry_entry, :delay_type),
+          last_state: Map.get(retry_entry, :last_state),
           worker_host: Map.get(retry_entry, :worker_host),
           workspace_path: Map.get(retry_entry, :workspace_path)
         }
@@ -827,7 +820,14 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp handle_retry_issue(%State{} = state, issue_id, attempt, metadata) do
-    case Tracker.fetch_candidate_issues() do
+    fetch_result =
+      if metadata[:delay_type] == :continuation do
+        Tracker.fetch_issue_states_by_ids([issue_id])
+      else
+        Tracker.fetch_candidate_issues()
+      end
+
+    case fetch_result do
       {:ok, issues} ->
         issues
         |> find_issue_by_id(issue_id)
@@ -836,13 +836,18 @@ defmodule SymphonyElixir.Orchestrator do
       {:error, reason} ->
         Logger.warning("Retry poll failed for issue_id=#{issue_id} issue_identifier=#{metadata[:identifier] || issue_id}: #{inspect(reason)}")
 
-        {:noreply,
-         schedule_issue_retry(
-           state,
-           issue_id,
-           attempt + 1,
-           Map.merge(metadata, %{error: "retry poll failed: #{inspect(reason)}"})
-         )}
+        if metadata[:delay_type] == :continuation and human_review_state?(metadata[:last_state]) do
+          Logger.info("Preserving known Human Review wait for issue_id=#{issue_id} after continuation refresh failure; not scheduling another retry")
+          {:noreply, release_issue_claim(state, issue_id)}
+        else
+          {:noreply,
+           schedule_issue_retry(
+             state,
+             issue_id,
+             attempt + 1,
+             Map.merge(metadata, %{error: "retry poll failed: #{inspect(reason)}"})
+           )}
+        end
     end
   end
 
@@ -856,11 +861,12 @@ defmodule SymphonyElixir.Orchestrator do
         cleanup_issue_workspace(issue.identifier, metadata[:worker_host])
         {:noreply, release_issue_claim(state, issue_id)}
 
-      retry_candidate_issue?(issue, terminal_states) ->
+      retry_candidate_issue?(issue, terminal_states) and
+          continuation_issue_state?(issue.state, continuation_state_set()) ->
         handle_active_retry(state, issue, attempt, metadata)
 
       true ->
-        Logger.debug("Issue left active states, removing claim issue_id=#{issue_id} issue_identifier=#{issue.identifier}")
+        Logger.debug("Issue left continuation states, removing claim issue_id=#{issue_id} issue_identifier=#{issue.identifier}")
 
         {:noreply, release_issue_claim(state, issue_id)}
     end
@@ -1080,6 +1086,15 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
+  @spec request_review_check(GenServer.server(), String.t()) :: map() | :unavailable
+  def request_review_check(server, issue_id) when is_binary(issue_id) do
+    if Process.whereis(server) do
+      GenServer.call(server, {:request_review_check, issue_id})
+    else
+      :unavailable
+    end
+  end
+
   @spec snapshot() :: map() | :timeout | :unavailable
   def snapshot, do: snapshot(__MODULE__, 15_000)
 
@@ -1120,7 +1135,7 @@ defmodule SymphonyElixir.Orchestrator do
           turn_count: Map.get(metadata, :turn_count, 0),
           started_at: metadata.started_at,
           last_codex_timestamp: metadata.last_codex_timestamp,
-          last_codex_message: metadata.last_codex_message,
+          last_codex_message: StatusDashboard.humanize_codex_message(metadata.last_codex_message),
           last_codex_event: metadata.last_codex_event,
           runtime_seconds: running_seconds(metadata.started_at, now)
         }
@@ -1167,6 +1182,24 @@ defmodule SymphonyElixir.Orchestrator do
        requested_at: DateTime.utc_now(),
        operations: ["poll", "reconcile"]
      }, state}
+  end
+
+  def handle_call({:request_review_check, issue_id}, _from, state) when is_binary(issue_id) do
+    state = refresh_runtime_config(state)
+
+    {payload, state} =
+      case Tracker.fetch_issue_states_by_ids([issue_id]) do
+        {:ok, [%Issue{} = issue | _]} ->
+          handle_review_check_issue(state, issue)
+
+        {:ok, []} ->
+          {%{queued: false, coalesced: false, issue_id: issue_id, reason: "issue_not_found", operations: ["review_check"]}, state}
+
+        {:error, reason} ->
+          {%{queued: false, coalesced: false, issue_id: issue_id, reason: inspect(reason), operations: ["review_check"]}, state}
+      end
+
+    {:reply, Map.put(payload, :requested_at, DateTime.utc_now()), state}
   end
 
   defp integrate_codex_update(running_entry, %{event: event, timestamp: timestamp} = update) do
@@ -1307,6 +1340,130 @@ defmodule SymphonyElixir.Orchestrator do
     candidate_issue?(issue, active_state_set(), terminal_states) and
       !todo_issue_blocked_by_non_terminal?(issue, terminal_states)
   end
+
+  defp handle_agent_down_reason(state, issue_id, running_entry, session_id, :normal) do
+    state = complete_issue(state, issue_id)
+
+    if continuation_issue_state?(running_entry.issue.state, continuation_state_set()) do
+      Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling continuation-state check")
+
+      schedule_issue_retry(state, issue_id, 1, %{
+        identifier: running_entry.identifier,
+        delay_type: :continuation,
+        last_state: running_entry.issue.state,
+        worker_host: Map.get(running_entry, :worker_host),
+        workspace_path: Map.get(running_entry, :workspace_path)
+      })
+    else
+      Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; issue state #{inspect(running_entry.issue.state)} is not continuable")
+
+      release_issue_claim(state, issue_id)
+    end
+  end
+
+  defp handle_agent_down_reason(state, issue_id, running_entry, session_id, reason) do
+    Logger.warning("Agent task exited for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}; scheduling retry")
+
+    next_attempt = next_retry_attempt_from_running(running_entry)
+
+    schedule_issue_retry(state, issue_id, next_attempt, %{
+      identifier: running_entry.identifier,
+      error: "agent exited: #{inspect(reason)}",
+      worker_host: Map.get(running_entry, :worker_host),
+      workspace_path: Map.get(running_entry, :workspace_path)
+    })
+  end
+
+  defp handle_review_check_issue(%State{} = state, %Issue{id: issue_id} = issue) do
+    checkpoint = review_checkpoint(issue)
+    previous_checkpoint = Map.get(state.review_checkpoints, issue_id)
+    changed? = previous_checkpoint != nil and previous_checkpoint != checkpoint
+
+    state = %{state | review_checkpoints: Map.put(state.review_checkpoints, issue_id, checkpoint)}
+    terminal_states = terminal_state_set()
+
+    cond do
+      terminal_issue_state?(issue.state, terminal_states) ->
+        {
+          %{
+            queued: false,
+            coalesced: false,
+            issue_id: issue_id,
+            issue_identifier: issue.identifier,
+            reason: "terminal_state",
+            operations: ["review_check"]
+          },
+          release_issue_claim(state, issue_id)
+        }
+
+      retry_candidate_issue?(issue, terminal_states) ->
+        {
+          %{
+            queued: true,
+            coalesced: false,
+            issue_id: issue_id,
+            issue_identifier: issue.identifier,
+            reason: "active_state",
+            operations: ["review_check", "dispatch"]
+          },
+          dispatch_issue(state, issue, %{delay_type: :review_check}, nil)
+        }
+
+      human_review_state?(issue.state) and changed? ->
+        {
+          %{
+            queued: true,
+            coalesced: false,
+            issue_id: issue_id,
+            issue_identifier: issue.identifier,
+            reason: "review_checkpoint_changed",
+            operations: ["review_check", "dispatch"]
+          },
+          do_dispatch_issue(state, issue, %{delay_type: :review_check}, nil)
+        }
+
+      human_review_state?(issue.state) ->
+        {
+          %{
+            queued: false,
+            coalesced: true,
+            issue_id: issue_id,
+            issue_identifier: issue.identifier,
+            reason: "review_checkpoint_unchanged",
+            operations: ["review_check"]
+          },
+          release_issue_claim(state, issue_id)
+        }
+
+      true ->
+        {
+          %{
+            queued: false,
+            coalesced: false,
+            issue_id: issue_id,
+            issue_identifier: issue.identifier,
+            reason: "not_dispatchable",
+            operations: ["review_check"]
+          },
+          release_issue_claim(state, issue_id)
+        }
+    end
+  end
+
+  defp review_checkpoint(%Issue{} = issue) do
+    %{
+      state: issue.state,
+      updated_at: issue.updated_at,
+      branch_name: issue.branch_name,
+      url: issue.url
+    }
+  end
+
+  defp human_review_state?(state_name) when is_binary(state_name) do
+    normalize_issue_state(state_name) in ["human review", "in review"]
+  end
+
+  defp human_review_state?(_state_name), do: false
 
   defp dispatch_slots_available?(%Issue{} = issue, %State{} = state) do
     available_slots(state) > 0 and state_slots_available?(issue, state.running)

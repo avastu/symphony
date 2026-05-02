@@ -94,11 +94,25 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert snapshot_entry.turn_count == 1
     assert snapshot_entry.last_codex_timestamp == now
 
-    assert snapshot_entry.last_codex_message == %{
-             event: :notification,
-             message: %{method: "some-event"},
-             timestamp: now
-           }
+    assert snapshot_entry.last_codex_message == "some-event"
+
+    send(
+      pid,
+      {:codex_worker_update, issue_id,
+       %{
+         event: :notification,
+         payload: %{
+           "method" => "giant-event",
+           "params" => %{"text" => String.duplicate("x", 10_000)}
+         },
+         timestamp: DateTime.utc_now()
+       }}
+    )
+
+    snapshot = GenServer.call(pid, :snapshot)
+    assert %{running: [snapshot_entry]} = snapshot
+    assert snapshot_entry.last_codex_message == "giant-event"
+    refute String.contains?(snapshot_entry.last_codex_message, String.duplicate("x", 100))
   end
 
   test "orchestrator snapshot tracks codex thread totals and app-server pid" do
