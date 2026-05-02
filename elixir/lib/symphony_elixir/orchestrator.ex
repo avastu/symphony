@@ -130,38 +130,7 @@ defmodule SymphonyElixir.Orchestrator do
         state = record_session_completion_totals(state, running_entry)
         session_id = running_entry_session_id(running_entry)
 
-        state =
-          case reason do
-            :normal ->
-              state = complete_issue(state, issue_id)
-
-              if continuation_issue_state?(running_entry.issue.state, continuation_state_set()) do
-                Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling continuation-state check")
-
-                schedule_issue_retry(state, issue_id, 1, %{
-                  identifier: running_entry.identifier,
-                  delay_type: :continuation,
-                  last_state: running_entry.issue.state,
-                  worker_host: Map.get(running_entry, :worker_host),
-                  workspace_path: Map.get(running_entry, :workspace_path)
-                })
-              else
-                Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; issue state #{inspect(running_entry.issue.state)} is not continuable")
-                release_issue_claim(state, issue_id)
-              end
-
-            _ ->
-              Logger.warning("Agent task exited for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}; scheduling retry")
-
-              next_attempt = next_retry_attempt_from_running(running_entry)
-
-              schedule_issue_retry(state, issue_id, next_attempt, %{
-                identifier: running_entry.identifier,
-                error: "agent exited: #{inspect(reason)}",
-                worker_host: Map.get(running_entry, :worker_host),
-                workspace_path: Map.get(running_entry, :workspace_path)
-              })
-          end
+        state = handle_agent_down_reason(state, issue_id, running_entry, session_id, reason)
 
         Logger.info("Agent task finished for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}")
 
@@ -1372,6 +1341,39 @@ defmodule SymphonyElixir.Orchestrator do
       !todo_issue_blocked_by_non_terminal?(issue, terminal_states)
   end
 
+  defp handle_agent_down_reason(state, issue_id, running_entry, session_id, :normal) do
+    state = complete_issue(state, issue_id)
+
+    if continuation_issue_state?(running_entry.issue.state, continuation_state_set()) do
+      Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling continuation-state check")
+
+      schedule_issue_retry(state, issue_id, 1, %{
+        identifier: running_entry.identifier,
+        delay_type: :continuation,
+        last_state: running_entry.issue.state,
+        worker_host: Map.get(running_entry, :worker_host),
+        workspace_path: Map.get(running_entry, :workspace_path)
+      })
+    else
+      Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; issue state #{inspect(running_entry.issue.state)} is not continuable")
+
+      release_issue_claim(state, issue_id)
+    end
+  end
+
+  defp handle_agent_down_reason(state, issue_id, running_entry, session_id, reason) do
+    Logger.warning("Agent task exited for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}; scheduling retry")
+
+    next_attempt = next_retry_attempt_from_running(running_entry)
+
+    schedule_issue_retry(state, issue_id, next_attempt, %{
+      identifier: running_entry.identifier,
+      error: "agent exited: #{inspect(reason)}",
+      worker_host: Map.get(running_entry, :worker_host),
+      workspace_path: Map.get(running_entry, :workspace_path)
+    })
+  end
+
   defp handle_review_check_issue(%State{} = state, %Issue{id: issue_id} = issue) do
     checkpoint = review_checkpoint(issue)
     previous_checkpoint = Map.get(state.review_checkpoints, issue_id)
@@ -1382,22 +1384,69 @@ defmodule SymphonyElixir.Orchestrator do
 
     cond do
       terminal_issue_state?(issue.state, terminal_states) ->
-        {%{queued: false, coalesced: false, issue_id: issue_id, issue_identifier: issue.identifier, reason: "terminal_state", operations: ["review_check"]}, release_issue_claim(state, issue_id)}
+        {
+          %{
+            queued: false,
+            coalesced: false,
+            issue_id: issue_id,
+            issue_identifier: issue.identifier,
+            reason: "terminal_state",
+            operations: ["review_check"]
+          },
+          release_issue_claim(state, issue_id)
+        }
 
       retry_candidate_issue?(issue, terminal_states) ->
-        {%{queued: true, coalesced: false, issue_id: issue_id, issue_identifier: issue.identifier, reason: "active_state", operations: ["review_check", "dispatch"]},
-         dispatch_issue(state, issue, %{delay_type: :review_check}, nil)}
+        {
+          %{
+            queued: true,
+            coalesced: false,
+            issue_id: issue_id,
+            issue_identifier: issue.identifier,
+            reason: "active_state",
+            operations: ["review_check", "dispatch"]
+          },
+          dispatch_issue(state, issue, %{delay_type: :review_check}, nil)
+        }
 
       human_review_state?(issue.state) and changed? ->
-        {%{queued: true, coalesced: false, issue_id: issue_id, issue_identifier: issue.identifier, reason: "review_checkpoint_changed", operations: ["review_check", "dispatch"]},
-         do_dispatch_issue(state, issue, %{delay_type: :review_check}, nil)}
+        {
+          %{
+            queued: true,
+            coalesced: false,
+            issue_id: issue_id,
+            issue_identifier: issue.identifier,
+            reason: "review_checkpoint_changed",
+            operations: ["review_check", "dispatch"]
+          },
+          do_dispatch_issue(state, issue, %{delay_type: :review_check}, nil)
+        }
 
       human_review_state?(issue.state) ->
-        {%{queued: false, coalesced: true, issue_id: issue_id, issue_identifier: issue.identifier, reason: "review_checkpoint_unchanged", operations: ["review_check"]},
-         release_issue_claim(state, issue_id)}
+        {
+          %{
+            queued: false,
+            coalesced: true,
+            issue_id: issue_id,
+            issue_identifier: issue.identifier,
+            reason: "review_checkpoint_unchanged",
+            operations: ["review_check"]
+          },
+          release_issue_claim(state, issue_id)
+        }
 
       true ->
-        {%{queued: false, coalesced: false, issue_id: issue_id, issue_identifier: issue.identifier, reason: "not_dispatchable", operations: ["review_check"]}, release_issue_claim(state, issue_id)}
+        {
+          %{
+            queued: false,
+            coalesced: false,
+            issue_id: issue_id,
+            issue_identifier: issue.identifier,
+            reason: "not_dispatchable",
+            operations: ["review_check"]
+          },
+          release_issue_claim(state, issue_id)
+        }
     end
   end
 
