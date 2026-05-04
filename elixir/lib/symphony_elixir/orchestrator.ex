@@ -202,8 +202,10 @@ defmodule SymphonyElixir.Orchestrator do
 
     with :ok <- Config.validate!(),
          {:ok, issues} <- Tracker.fetch_candidate_issues(),
-         true <- available_slots(state) > 0 do
-      choose_issues(issues, state)
+         {:ok, review_issues} <- fetch_review_issues() do
+      state
+      |> maybe_choose_issues(issues)
+      |> check_review_issues(review_issues)
     else
       {:error, :missing_linear_api_token} ->
         Logger.error("Linear API token missing in WORKFLOW.md")
@@ -247,6 +249,33 @@ defmodule SymphonyElixir.Orchestrator do
         state
     end
   end
+
+  defp maybe_choose_issues(%State{} = state, issues) do
+    if available_slots(state) > 0 do
+      choose_issues(issues, state)
+    else
+      state
+    end
+  end
+
+  defp fetch_review_issues do
+    Tracker.fetch_issues_by_states(review_state_names())
+  end
+
+  defp review_state_names, do: ["Human Review", "In Review"]
+
+  defp check_review_issues(%State{} = state, issues) when is_list(issues) do
+    Enum.reduce(issues, state, fn
+      %Issue{} = issue, state_acc ->
+        {_payload, updated_state} = handle_review_check_issue(state_acc, issue)
+        updated_state
+
+      _issue, state_acc ->
+        state_acc
+    end)
+  end
+
+  defp check_review_issues(%State{} = state, _issues), do: state
 
   defp reconcile_running_issues(%State{} = state) do
     state = reconcile_stalled_running_issues(state)
@@ -329,6 +358,11 @@ defmodule SymphonyElixir.Orchestrator do
 
       !issue_routable_to_worker?(issue) ->
         Logger.info("Issue no longer routed to this worker: #{issue_context(issue)} assignee=#{inspect(issue.assignee_id)}; stopping active agent")
+
+        terminate_running_issue(state, issue.id, false)
+
+      issue_blocked?(issue, terminal_states) ->
+        Logger.info("Issue is blocked: #{issue_context(issue)} state=#{issue.state} workpad_state=#{inspect(issue.workpad_state)} blocked_by=#{length(issue.blocked_by)}; stopping active agent")
 
         terminate_running_issue(state, issue.id, false)
 
@@ -534,7 +568,7 @@ defmodule SymphonyElixir.Orchestrator do
          terminal_states
        ) do
     candidate_issue?(issue, active_states, terminal_states) and
-      !todo_issue_blocked_by_non_terminal?(issue, terminal_states) and
+      !issue_blocked?(issue, terminal_states) and
       !MapSet.member?(claimed, issue.id) and
       !Map.has_key?(running, issue.id) and
       available_slots(state) > 0 and
@@ -588,22 +622,30 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp issue_routable_to_worker?(_issue), do: true
 
-  defp todo_issue_blocked_by_non_terminal?(
-         %Issue{state: issue_state, blocked_by: blockers},
-         terminal_states
-       )
-       when is_binary(issue_state) and is_list(blockers) do
-    normalize_issue_state(issue_state) == "todo" and
-      Enum.any?(blockers, fn
-        %{state: blocker_state} when is_binary(blocker_state) ->
-          !terminal_issue_state?(blocker_state, terminal_states)
-
-        _ ->
-          true
-      end)
+  defp issue_blocked?(%Issue{} = issue, terminal_states) do
+    blocked_by_non_terminal?(issue.blocked_by, terminal_states) or
+      (workpad_blocked?(issue) and issue.blocked_by == [])
   end
 
-  defp todo_issue_blocked_by_non_terminal?(_issue, _terminal_states), do: false
+  defp issue_blocked?(_issue, _terminal_states), do: false
+
+  defp workpad_blocked?(%Issue{workpad_state: workpad_state}) when is_binary(workpad_state) do
+    normalize_issue_state(workpad_state) == "blocked"
+  end
+
+  defp workpad_blocked?(_issue), do: false
+
+  defp blocked_by_non_terminal?(blockers, terminal_states) when is_list(blockers) do
+    Enum.any?(blockers, fn
+      %{state: blocker_state} when is_binary(blocker_state) ->
+        !terminal_issue_state?(blocker_state, terminal_states)
+
+      _ ->
+        true
+    end)
+  end
+
+  defp blocked_by_non_terminal?(_blockers, _terminal_states), do: false
 
   defp terminal_issue_state?(state_name, terminal_states) when is_binary(state_name) do
     MapSet.member?(terminal_states, normalize_issue_state(state_name))
@@ -1338,13 +1380,13 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp retry_candidate_issue?(%Issue{} = issue, terminal_states) do
     candidate_issue?(issue, active_state_set(), terminal_states) and
-      !todo_issue_blocked_by_non_terminal?(issue, terminal_states)
+      !issue_blocked?(issue, terminal_states)
   end
 
   defp handle_agent_down_reason(state, issue_id, running_entry, session_id, :normal) do
     state = complete_issue(state, issue_id)
 
-    if continuation_issue_state?(running_entry.issue.state, continuation_state_set()) do
+    if continuation_issue?(running_entry.issue) do
       Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling continuation-state check")
 
       schedule_issue_retry(state, issue_id, 1, %{
@@ -1373,6 +1415,13 @@ defmodule SymphonyElixir.Orchestrator do
       workspace_path: Map.get(running_entry, :workspace_path)
     })
   end
+
+  defp continuation_issue?(%Issue{} = issue) do
+    continuation_issue_state?(issue.state, continuation_state_set()) and
+      !issue_blocked?(issue, terminal_state_set())
+  end
+
+  defp continuation_issue?(_issue), do: false
 
   defp handle_review_check_issue(%State{} = state, %Issue{id: issue_id} = issue) do
     checkpoint = review_checkpoint(issue)
@@ -1410,17 +1459,7 @@ defmodule SymphonyElixir.Orchestrator do
         }
 
       human_review_state?(issue.state) and changed? ->
-        {
-          %{
-            queued: true,
-            coalesced: false,
-            issue_id: issue_id,
-            issue_identifier: issue.identifier,
-            reason: "review_checkpoint_changed",
-            operations: ["review_check", "dispatch"]
-          },
-          do_dispatch_issue(state, issue, %{delay_type: :review_check}, nil)
-        }
+        transition_review_issue_to_rework(state, issue)
 
       human_review_state?(issue.state) ->
         {
@@ -1448,6 +1487,70 @@ defmodule SymphonyElixir.Orchestrator do
           release_issue_claim(state, issue_id)
         }
     end
+  end
+
+  defp transition_review_issue_to_rework(%State{} = state, %Issue{id: issue_id} = issue)
+       when is_binary(issue_id) do
+    case Tracker.update_issue_state(issue_id, "Rework") do
+      :ok ->
+        rework_issue = %{issue | state: "Rework"}
+        state = %{state | review_checkpoints: Map.put(state.review_checkpoints, issue_id, review_checkpoint(rework_issue))}
+
+        if dispatch_slots_available?(rework_issue, state) do
+          {
+            %{
+              queued: true,
+              coalesced: false,
+              issue_id: issue_id,
+              issue_identifier: issue.identifier,
+              reason: "review_checkpoint_changed_rework",
+              operations: ["review_check", "state:Rework", "dispatch"]
+            },
+            do_dispatch_issue(state, rework_issue, %{delay_type: :review_check}, nil)
+          }
+        else
+          {
+            %{
+              queued: false,
+              coalesced: false,
+              issue_id: issue_id,
+              issue_identifier: issue.identifier,
+              reason: "review_checkpoint_changed_rework_no_capacity",
+              operations: ["review_check", "state:Rework"]
+            },
+            release_issue_claim(state, issue_id)
+          }
+        end
+
+      {:error, reason} ->
+        Logger.warning("Failed to move review issue to Rework: #{issue_context(issue)} reason=#{inspect(reason)}")
+
+        {
+          %{
+            queued: false,
+            coalesced: false,
+            issue_id: issue_id,
+            issue_identifier: issue.identifier,
+            reason: "rework_transition_failed: #{inspect(reason)}",
+            operations: ["review_check"]
+          },
+          release_issue_claim(state, issue_id)
+        }
+    end
+  end
+
+  defp transition_review_issue_to_rework(%State{} = state, %Issue{} = issue) do
+    {
+      %{
+        queued: false,
+        coalesced: false,
+        issue_id: issue.id,
+        issue_identifier: issue.identifier,
+        reason: "missing_issue_id",
+        operations: ["review_check"]
+      },
+      state
+    }
   end
 
   defp review_checkpoint(%Issue{} = issue) do

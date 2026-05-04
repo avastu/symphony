@@ -147,7 +147,7 @@ defmodule SymphonyElixir.AgentRunner do
   defp continue_with_issue?(%Issue{id: issue_id} = issue, issue_state_fetcher) when is_binary(issue_id) do
     case issue_state_fetcher.([issue_id]) do
       {:ok, [%Issue{} = refreshed_issue | _]} ->
-        if continuation_issue_state?(refreshed_issue.state) do
+        if continuation_issue?(refreshed_issue) do
           {:continue, refreshed_issue}
         else
           {:done, refreshed_issue}
@@ -163,6 +163,12 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp continue_with_issue?(issue, _issue_state_fetcher), do: {:done, issue}
 
+  defp continuation_issue?(%Issue{} = issue) do
+    continuation_issue_state?(issue.state) and !issue_blocked?(issue)
+  end
+
+  defp continuation_issue?(_issue), do: false
+
   defp continuation_issue_state?(state_name) when is_binary(state_name) do
     normalized_state = normalize_issue_state(state_name)
 
@@ -171,6 +177,36 @@ defmodule SymphonyElixir.AgentRunner do
   end
 
   defp continuation_issue_state?(_state_name), do: false
+
+  defp issue_blocked?(%Issue{} = issue) do
+    blocked_by_non_terminal?(issue.blocked_by) or
+      (workpad_blocked?(issue) and issue.blocked_by == [])
+  end
+
+  defp issue_blocked?(_issue), do: false
+
+  defp workpad_blocked?(%Issue{workpad_state: workpad_state}) when is_binary(workpad_state) do
+    normalize_issue_state(workpad_state) == "blocked"
+  end
+
+  defp workpad_blocked?(_issue), do: false
+
+  defp blocked_by_non_terminal?(blockers) when is_list(blockers) do
+    terminal_states =
+      Config.settings!().tracker.terminal_states
+      |> Enum.map(&normalize_issue_state/1)
+      |> MapSet.new()
+
+    Enum.any?(blockers, fn
+      %{state: blocker_state} when is_binary(blocker_state) ->
+        !MapSet.member?(terminal_states, normalize_issue_state(blocker_state))
+
+      _ ->
+        true
+    end)
+  end
+
+  defp blocked_by_non_terminal?(_blockers), do: false
 
   defp selected_worker_host(nil, []), do: nil
 

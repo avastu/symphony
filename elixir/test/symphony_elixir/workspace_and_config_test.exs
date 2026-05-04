@@ -341,6 +341,20 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
           }
         ]
       },
+      "comments" => %{
+        "nodes" => [
+          %{
+            "body" => "## Codex Workpad\n\nState: working\nPhase: implementation\n",
+            "createdAt" => "2026-01-01T00:00:00Z",
+            "updatedAt" => "2026-01-01T00:00:00Z"
+          },
+          %{
+            "body" => "## Codex Workpad\n\nState: blocked\nPhase: agent_review\n",
+            "createdAt" => "2026-01-02T00:00:00Z",
+            "updatedAt" => "2026-01-02T00:00:00Z"
+          }
+        ]
+      },
       "createdAt" => "2026-01-01T00:00:00Z",
       "updatedAt" => "2026-01-02T00:00:00Z"
     }
@@ -351,6 +365,8 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert issue.labels == ["backend"]
     assert issue.priority == 2
     assert issue.state == "Todo"
+    assert issue.workpad_state == "blocked"
+    assert issue.workpad_phase == "agent_review"
     assert issue.assignee_id == "user-1"
     assert issue.assigned_to_worker
   end
@@ -496,7 +512,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert Enum.map(sorted, & &1.identifier) == ["MT-200", "MT-201", "MT-199"]
   end
 
-  test "todo issue with non-terminal blocker is not dispatch-eligible" do
+  test "issue with non-terminal blocker is not dispatch-eligible" do
     state = %Orchestrator.State{
       max_concurrent_agents: 3,
       running: %{},
@@ -514,6 +530,51 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     }
 
     refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+
+    in_progress_issue = %{issue | id: "blocked-1b", state: "In Progress"}
+
+    refute Orchestrator.should_dispatch_issue_for_test(in_progress_issue, state)
+  end
+
+  test "issue with blocked workpad state is not dispatch-eligible" do
+    state = %Orchestrator.State{
+      max_concurrent_agents: 3,
+      running: %{},
+      claimed: MapSet.new(),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{}
+    }
+
+    issue = %Issue{
+      id: "blocked-workpad-1",
+      identifier: "MT-1008",
+      title: "Blocked by workpad",
+      state: "In Progress",
+      workpad_state: "blocked"
+    }
+
+    refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+  end
+
+  test "blocked workpad with terminal blocker resumes dispatch eligibility" do
+    state = %Orchestrator.State{
+      max_concurrent_agents: 3,
+      running: %{},
+      claimed: MapSet.new(),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{}
+    }
+
+    issue = %Issue{
+      id: "unblocked-workpad-1",
+      identifier: "MT-1009",
+      title: "Unblocked by dependency",
+      state: "Todo",
+      workpad_state: "blocked",
+      blocked_by: [%{id: "blocker-4", identifier: "MT-1010", state: "Done"}]
+    }
+
+    assert Orchestrator.should_dispatch_issue_for_test(issue, state)
   end
 
   test "issue assigned to another worker is not dispatch-eligible" do

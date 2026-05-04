@@ -43,6 +43,13 @@ defmodule SymphonyElixir.Linear.Client do
             }
           }
         }
+        comments(last: 20) {
+          nodes {
+            body
+            createdAt
+            updatedAt
+          }
+        }
         createdAt
         updatedAt
       }
@@ -86,6 +93,13 @@ defmodule SymphonyElixir.Linear.Client do
                 name
               }
             }
+          }
+        }
+        comments(last: 20) {
+          nodes {
+            body
+            createdAt
+            updatedAt
           }
         }
         createdAt
@@ -458,6 +472,8 @@ defmodule SymphonyElixir.Linear.Client do
       branch_name: issue["branchName"],
       url: issue["url"],
       assignee_id: assignee_field(assignee, "id"),
+      workpad_state: latest_workpad_field(issue, "State"),
+      workpad_phase: latest_workpad_field(issue, "Phase"),
       blocked_by: extract_blockers(issue),
       labels: extract_labels(issue),
       assigned_to_worker: assigned_to_worker?(assignee, assignee_filter),
@@ -571,6 +587,57 @@ defmodule SymphonyElixir.Linear.Client do
   end
 
   defp extract_blockers(_), do: []
+
+  defp latest_workpad_field(issue, field_name) when is_map(issue) and is_binary(field_name) do
+    issue
+    |> latest_workpad_body()
+    |> workpad_field(field_name)
+  end
+
+  defp latest_workpad_field(_issue, _field_name), do: nil
+
+  defp latest_workpad_body(%{"comments" => %{"nodes" => comments}}) when is_list(comments) do
+    comments
+    |> Enum.filter(fn comment ->
+      comment
+      |> Map.get("body", "")
+      |> to_string()
+      |> String.trim_leading()
+      |> String.starts_with?("## Codex Workpad")
+    end)
+    |> Enum.sort_by(&comment_updated_at_sort_key/1, :desc)
+    |> List.first()
+    |> case do
+      %{"body" => body} when is_binary(body) -> body
+      _ -> nil
+    end
+  end
+
+  defp latest_workpad_body(_issue), do: nil
+
+  defp workpad_field(body, field_name) when is_binary(body) and is_binary(field_name) do
+    field_pattern = ~r/^\s*#{Regex.escape(field_name)}:\s*(.*?)\s*$/m
+
+    case Regex.run(field_pattern, body) do
+      [_line, value] -> String.trim(value)
+      _ -> nil
+    end
+  end
+
+  defp workpad_field(_body, _field_name), do: nil
+
+  defp comment_updated_at_sort_key(comment) when is_map(comment) do
+    comment["updatedAt"]
+    |> parse_datetime()
+    |> case do
+      %DateTime{} = timestamp -> timestamp
+      _ -> parse_datetime(comment["createdAt"])
+    end
+    |> case do
+      %DateTime{} = timestamp -> DateTime.to_unix(timestamp, :microsecond)
+      _ -> 0
+    end
+  end
 
   defp parse_datetime(nil), do: nil
 

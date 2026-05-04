@@ -130,7 +130,7 @@ The agent should be able to talk to Linear, either via a configured Linear MCP s
 - `Todo` -> queued; immediately transition to `In Progress` before active work.
   - Special case: if a PR is already attached, treat as feedback/rework loop (run full PR feedback sweep, address or explicitly push back, revalidate, return to `Human Review`).
 - `In Progress` -> implementation actively underway.
-- `Human Review` -> PR is attached and validated; waiting on human approval or review/check events. This state is not continuously polled by the normal active loop.
+- `Human Review` -> PR is attached and validated; waiting on human approval or review/check events. This state is not continuously dispatched by the normal active loop, but review/checkpoint scans must move issues with new actionable review feedback to `Rework`.
 - `Merging` -> approved by human; execute the `land` skill flow (do not call `gh pr merge` directly).
 - `Rework` -> reviewer requested changes; planning + implementation required.
 - `Done` -> terminal state; no further action required.
@@ -168,7 +168,7 @@ Migration notes for a running control plane:
    - `Todo` -> immediately move to `In Progress`, then ensure bootstrap workpad comment exists (create if missing), then start execution flow.
      - If PR is already attached, start by reviewing all open PR comments and deciding required changes vs explicit pushback responses.
    - `In Progress` -> continue execution flow from current scratchpad comment.
-   - `Human Review` -> wait for event/checkpoint wakeups; do not enter the normal active polling loop.
+   - `Human Review` -> wait for event/checkpoint wakeups; if new PR review feedback, check annotations, review comments, or human change requests are detected, move to `Rework` and address them.
    - `Merging` -> on entry, open and follow `.codex/skills/land/SKILL.md`; do not call `gh pr merge` directly.
    - `Rework` -> run rework flow.
    - `Done` -> do nothing and shut down.
@@ -289,7 +289,7 @@ Use this only when completion is blocked by missing required tools or missing au
 ## Step 3: Human Review and merge handling
 
 1. When the issue is in `Human Review`, do not code or change ticket content unless a supported review/check threshold moves the issue to `Rework`/`Merging` or triggers a one-shot review-check turn.
-2. Do not repeatedly poll Linear comments for stable `Human Review` issues. Resume only on meaningful changes such as a new Utsav comment, state transition to `Rework` or `Merging`, PR checks completing, new unresolved review feedback, check annotations, or PR head SHA changes.
+2. Do not repeatedly dispatch stable `Human Review` issues. The control plane may scan review/checkpoint metadata; if it detects a meaningful change such as a new Utsav comment, PR checks completing, new unresolved review feedback, check annotations, or PR head SHA changes, it must move the issue to `Rework` before dispatching the agent to address the feedback.
 3. If review feedback requires changes, move the issue to `Rework` and follow the rework flow.
 4. If approved, human moves the issue to `Merging`.
 5. When the issue is in `Merging`, open and follow `.codex/skills/land/SKILL.md`, then run the `land` skill in a loop until the PR is merged. Do not call `gh pr merge` directly.
