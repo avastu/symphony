@@ -5,6 +5,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
   use Phoenix.LiveView, layout: {SymphonyElixirWeb.Layouts, :app}
 
+  alias SymphonyElixir.AttentionInbox
   alias SymphonyElixirWeb.{Endpoint, ObservabilityPubSub, Presenter}
   @runtime_tick_ms 1_000
 
@@ -13,6 +14,8 @@ defmodule SymphonyElixirWeb.DashboardLive do
     socket =
       socket
       |> assign(:payload, load_payload())
+      |> assign(:attention, load_attention())
+      |> assign(:attention_action_message, nil)
       |> assign(:now, DateTime.utc_now())
 
     if connected?(socket) do
@@ -34,7 +37,33 @@ defmodule SymphonyElixirWeb.DashboardLive do
     {:noreply,
      socket
      |> assign(:payload, load_payload())
+     |> assign(:attention, load_attention())
      |> assign(:now, DateTime.utc_now())}
+  end
+
+  @impl true
+  def handle_event("attention_refresh", _params, socket) do
+    case AttentionInbox.refresh(attention_inbox()) do
+      {:ok, attention} ->
+        {:noreply,
+         socket
+         |> assign(:attention, attention)
+         |> assign(:attention_action_message, "Attention inbox refreshed.")}
+
+      {:error, _reason, attention} ->
+        {:noreply,
+         socket
+         |> assign(:attention, attention)
+         |> assign(:attention_action_message, "Attention inbox refresh failed.")}
+    end
+  end
+
+  def handle_event("attention_approve", %{"issue" => issue_identifier}, socket) do
+    handle_attention_action(socket, issue_identifier, :approve, nil)
+  end
+
+  def handle_event("attention_deny", %{"issue" => issue_identifier} = params, socket) do
+    handle_attention_action(socket, issue_identifier, :deny, Map.get(params, "note"))
   end
 
   @impl true
@@ -115,6 +144,108 @@ defmodule SymphonyElixirWeb.DashboardLive do
           </div>
 
           <pre class="code-panel"><%= pretty_value(@payload.rate_limits) %></pre>
+        </section>
+
+        <section class="section-card attention-section">
+          <div class="section-header">
+            <div>
+              <h2 class="section-title">Attention inbox</h2>
+              <p class="section-copy">
+                Prioritized human decisions, blockers, review-ready work, and comments from the cached Linear attention scan.
+              </p>
+            </div>
+
+            <button type="button" class="secondary" phx-click="attention_refresh">
+              Refresh
+            </button>
+          </div>
+
+          <div class="attention-meta">
+            <span class={attention_status_class(@attention.status)}>
+              <%= @attention.status %>
+            </span>
+            <span :if={@attention.fetched_at} class="muted mono numeric">
+              Cached <%= @attention.fetched_at %>
+            </span>
+            <span :if={@attention.refreshing} class="muted">refreshing...</span>
+            <span :if={@attention.stale} class="state-badge state-badge-warning">stale</span>
+          </div>
+
+          <p :if={@attention_action_message} class="action-message">
+            <%= @attention_action_message %>
+          </p>
+
+          <p :if={@attention.error} class="attention-error">
+            <%= @attention.error %>
+          </p>
+
+          <%= if @attention.items == [] do %>
+            <p class="empty-state">No attention items are currently cached.</p>
+          <% else %>
+            <div class="attention-list">
+              <article :for={item <- @attention.items} class={"attention-item attention-rank-#{item.priority_rank}"}>
+                <div class="attention-main">
+                  <div class="attention-topline">
+                    <span class={priority_badge_class(item.priority_rank)}>
+                      <%= item.priority_label %>
+                    </span>
+                    <span class={attention_classification_class(item.classification)}>
+                      <%= item.classification %>
+                    </span>
+                    <span class={state_badge_class(item.linear_state)}>
+                      <%= item.linear_state %>
+                    </span>
+                    <span :if={item.project != ""} class="muted">
+                      <%= item.project %>
+                    </span>
+                  </div>
+
+                  <h3 class="attention-title">
+                    <a href={item.url} target="_blank" rel="noreferrer"><%= item.identifier %>: <%= item.title %></a>
+                  </h3>
+
+                  <p class="attention-copy"><strong>Why:</strong> <%= item.reason %></p>
+                  <p class="attention-copy"><strong>Next:</strong> <%= item.next_action %></p>
+                  <p :if={item.excerpt != ""} class="attention-excerpt"><%= item.excerpt %></p>
+
+                  <div :if={item.deployment_links != []} class="attention-links">
+                    <a
+                      :for={link <- item.deployment_links}
+                      class="deployment-link"
+                      href={link.url}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      <%= link.label %>
+                    </a>
+                  </div>
+                </div>
+
+                <div class="attention-actions">
+                  <button
+                    type="button"
+                    class="subtle-button approve-button"
+                    phx-click="attention_approve"
+                    phx-value-issue={item.identifier}
+                  >
+                    Approve
+                  </button>
+
+                  <form class="deny-form" phx-submit="attention_deny">
+                    <input type="hidden" name="issue" value={item.identifier} />
+                    <input
+                      class="deny-input"
+                      type="text"
+                      name="note"
+                      placeholder="Change request"
+                      aria-label={"Change request for #{item.identifier}"}
+                    />
+                    <button type="submit" class="subtle-button deny-button">Deny</button>
+                  </form>
+                </div>
+              </article>
+            </div>
+          <% end %>
         </section>
 
         <section class="section-card">
@@ -253,12 +384,42 @@ defmodule SymphonyElixirWeb.DashboardLive do
     Presenter.state_payload(orchestrator(), snapshot_timeout_ms())
   end
 
+  defp load_attention do
+    AttentionInbox.snapshot(attention_inbox())
+  end
+
   defp orchestrator do
     Endpoint.config(:orchestrator) || SymphonyElixir.Orchestrator
   end
 
   defp snapshot_timeout_ms do
     Endpoint.config(:snapshot_timeout_ms) || 15_000
+  end
+
+  defp attention_inbox do
+    Endpoint.config(:attention_inbox) || AttentionInbox
+  end
+
+  defp handle_attention_action(socket, issue_identifier, action, note) do
+    result =
+      case action do
+        :approve -> AttentionInbox.act(attention_inbox(), issue_identifier, :approve)
+        :deny -> AttentionInbox.act(attention_inbox(), issue_identifier, :deny, note: note)
+      end
+
+    case result do
+      {:ok, attention} ->
+        {:noreply,
+         socket
+         |> assign(:attention, attention)
+         |> assign(:attention_action_message, attention_action_success_message(issue_identifier, action))}
+
+      {:error, _reason, attention} ->
+        {:noreply,
+         socket
+         |> assign(:attention, attention)
+         |> assign(:attention_action_message, attention_action_failure_message(issue_identifier, action))}
+    end
   end
 
   defp completed_runtime_seconds(payload) do
@@ -319,6 +480,36 @@ defmodule SymphonyElixirWeb.DashboardLive do
       String.contains?(normalized, ["todo", "queued", "pending", "retry"]) -> "#{base} state-badge-warning"
       true -> base
     end
+  end
+
+  defp attention_status_class("ready"), do: "state-badge state-badge-active"
+  defp attention_status_class("error"), do: "state-badge state-badge-danger"
+  defp attention_status_class("unavailable"), do: "state-badge state-badge-danger"
+  defp attention_status_class(_status), do: "state-badge"
+
+  defp priority_badge_class(0), do: "priority-badge priority-badge-critical"
+  defp priority_badge_class(1), do: "priority-badge priority-badge-high"
+  defp priority_badge_class(2), do: "priority-badge priority-badge-review"
+  defp priority_badge_class(_rank), do: "priority-badge"
+
+  defp attention_classification_class(classification) do
+    "classification-badge classification-#{classification}"
+  end
+
+  defp attention_action_success_message(issue_identifier, :approve) do
+    "Posted approval for #{issue_identifier}."
+  end
+
+  defp attention_action_success_message(issue_identifier, :deny) do
+    "Posted change request for #{issue_identifier}."
+  end
+
+  defp attention_action_failure_message(issue_identifier, :approve) do
+    "Failed to post approval for #{issue_identifier}."
+  end
+
+  defp attention_action_failure_message(issue_identifier, :deny) do
+    "Failed to post change request for #{issue_identifier}."
   end
 
   defp schedule_runtime_tick do

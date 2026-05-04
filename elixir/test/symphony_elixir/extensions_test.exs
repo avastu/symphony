@@ -4,7 +4,7 @@ defmodule SymphonyElixir.ExtensionsTest do
   import Phoenix.ConnTest
   import Phoenix.LiveViewTest
 
-  alias SymphonyElixir.Linear.Adapter
+  alias SymphonyElixir.{AttentionInbox, Linear.Adapter}
   alias SymphonyElixir.Tracker.Memory
 
   @endpoint SymphonyElixirWeb.Endpoint
@@ -461,6 +461,56 @@ defmodule SymphonyElixir.ExtensionsTest do
                  "message" => "Orchestrator is unavailable"
                }
              }
+  end
+
+  test "phoenix observability api exposes cached attention inbox and guarded actions" do
+    attention_name = Module.concat(__MODULE__, :ApiAttentionInbox)
+    reply_agent = start_supervised!({Agent, fn -> [] end})
+
+    fetch_fun = fn ->
+      {:ok,
+       Jason.encode!([
+         %{
+           "identifier" => "UTS-42",
+           "title" => "Review fixture",
+           "url" => "https://linear.app/utsav/issue/UTS-42/review-fixture",
+           "linear_state" => "Human Review",
+           "project" => "Beta Launch Validation",
+           "classification" => "ready_for_review",
+           "reason" => "Issue is ready for human review.",
+           "next_action" => "Review the linked artifacts.",
+           "excerpt" => "Preview: https://tpl-preview.vercel.app"
+         }
+       ])}
+    end
+
+    reply_fun = fn issue, body ->
+      Agent.update(reply_agent, &(&1 ++ [{issue, body}]))
+      :ok
+    end
+
+    start_supervised!({AttentionInbox, name: attention_name, fetch_fun: fetch_fun, reply_fun: reply_fun, auto_refresh: false})
+
+    assert {:ok, _snapshot} = AttentionInbox.refresh(attention_name)
+
+    start_test_endpoint(attention_inbox: attention_name)
+
+    attention_payload = json_response(get(build_conn(), "/api/v1/attention"), 200)
+    assert attention_payload["status"] == "ready"
+
+    assert [%{"identifier" => "UTS-42", "deployment_links" => [%{"label" => "Vercel deployment"}]}] =
+             attention_payload["items"]
+
+    response = post(build_conn(), "/api/v1/attention/UTS-42/approve", %{})
+    assert json_response(response, 202)["last_action"]["action"] == "approve"
+
+    response = post(build_conn(), "/api/v1/attention/UTS-42/deny", %{"note" => "include the deployment link"})
+    assert json_response(response, 202)["last_action"]["action"] == "deny"
+
+    assert Agent.get(reply_agent, & &1) == [
+             {"UTS-42", "Approved."},
+             {"UTS-42", "Revise plan: include the deployment link"}
+           ]
   end
 
   test "phoenix observability api preserves snapshot timeout behavior" do
