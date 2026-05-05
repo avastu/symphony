@@ -8,12 +8,12 @@ defmodule SymphonyElixir.AttentionInbox do
   alias SymphonyElixirWeb.ObservabilityPubSub
 
   @classification_priority %{
-    "needs_decision" => {0, "P0"},
-    "blocked" => {1, "P1"},
-    "ready_for_review" => {2, "P2"},
-    "unanswered_comment" => {2, "P2"},
-    "stale_wait" => {3, "P3"},
-    "fyi" => {4, "P4"}
+    "needs_decision" => {20, "P2 Decide", "Decision needed."},
+    "blocked" => {10, "P1 Blocker", "Blocked work needs intervention."},
+    "ready_for_review" => {30, "P3 Review", "Ready for human review."},
+    "unanswered_comment" => {35, "P3 Reply", "Unanswered comment needs a response."},
+    "stale_wait" => {40, "P4 Stale", "Waiting state is stale."},
+    "fyi" => {50, "P5 FYI", "Informational."}
   }
   @default_refresh_ms 60_000
   @default_command "/Users/utsav/dev/symphony-control/scripts/attention-inbox"
@@ -227,8 +227,8 @@ defmodule SymphonyElixir.AttentionInbox do
 
   defp normalize_item(item) when is_map(item) do
     classification = string_value(item, "classification")
-    {priority_rank, priority_label} = Map.get(@classification_priority, classification, {9, "P9"})
     text_values = known_text_values(item)
+    priority = priority_for(item, classification, text_values)
 
     links =
       item
@@ -246,8 +246,11 @@ defmodule SymphonyElixir.AttentionInbox do
       reason: string_value(item, "reason"),
       next_action: string_value(item, "next_action"),
       excerpt: string_value(item, "excerpt"),
-      priority_rank: priority_rank,
-      priority_label: priority_label,
+      priority_rank: priority.rank,
+      priority_label: priority.label,
+      priority_reason: priority.reason,
+      action_family: priority.action_family,
+      action_label: priority.action_label,
       links: links,
       deployment_links:
         item
@@ -266,6 +269,94 @@ defmodule SymphonyElixir.AttentionInbox do
     |> Enum.map(&string_value(item, &1))
     |> Enum.reject(&(&1 == ""))
   end
+
+  defp priority_for(item, classification, text_values) do
+    haystack =
+      [classification, string_value(item, "linear_state") | text_values]
+      |> Enum.join("\n")
+      |> String.downcase()
+
+    cond do
+      routing_fix?(haystack) ->
+        %{
+          rank: 0,
+          label: "P0 Route",
+          reason: "Small routing fix unlocks Symphony dispatch.",
+          action_family: "routing",
+          action_label: "Add repo routing"
+        }
+
+      blocker?(classification, haystack) ->
+        %{
+          rank: 10,
+          label: "P1 Blocker",
+          reason: "Currently blocked; this is stopping active work.",
+          action_family: "blocker",
+          action_label: "Resolve blocker"
+        }
+
+      merge_or_pr_review?(haystack) ->
+        %{
+          rank: 15,
+          label: "P1 Review",
+          reason: "Review or merge decision can move completed work forward.",
+          action_family: "review",
+          action_label: "Review PR"
+        }
+
+      scope_decision?(haystack) ->
+        %{
+          rank: 18,
+          label: "P2 Scope",
+          reason: "Scope decision prevents work from drifting.",
+          action_family: "decision",
+          action_label: "Decide scope"
+        }
+
+      true ->
+        {rank, label, reason} = Map.get(@classification_priority, classification, {90, "P9", "Unclassified."})
+
+        %{
+          rank: rank,
+          label: label,
+          reason: reason,
+          action_family: classification,
+          action_label: default_action_label(classification)
+        }
+    end
+  end
+
+  defp routing_fix?(haystack) do
+    String.contains?(haystack, "repos:") or
+      String.contains?(haystack, "repository declaration") or
+      String.contains?(haystack, "route the workspace") or
+      String.contains?(haystack, "reply `retry`") or
+      String.contains?(haystack, "reply retry")
+  end
+
+  defp blocker?("blocked", _haystack), do: true
+  defp blocker?(_classification, haystack), do: String.contains?(haystack, "blocked")
+
+  defp merge_or_pr_review?(haystack) do
+    String.contains?(haystack, "review pr") or
+      String.contains?(haystack, "pull request") or
+      String.contains?(haystack, "github.com") or
+      String.contains?(haystack, "approved") or
+      String.contains?(haystack, "merge")
+  end
+
+  defp scope_decision?(haystack) do
+    String.contains?(haystack, "out of scope") or
+      String.contains?(haystack, "expand this pr") or
+      String.contains?(haystack, "defer")
+  end
+
+  defp default_action_label("needs_decision"), do: "Decide"
+  defp default_action_label("ready_for_review"), do: "Review"
+  defp default_action_label("unanswered_comment"), do: "Reply"
+  defp default_action_label("stale_wait"), do: "Check stale"
+  defp default_action_label("fyi"), do: "FYI"
+  defp default_action_label(classification), do: classification
 
   defp extract_links(values) do
     values

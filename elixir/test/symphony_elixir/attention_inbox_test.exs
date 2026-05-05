@@ -60,6 +60,51 @@ defmodule SymphonyElixir.AttentionInboxTest do
     assert Agent.get(fetch_counter, & &1) == 1
   end
 
+  test "priority favors routing fixes before general review work" do
+    fetch_fun = fn ->
+      {:ok,
+       Jason.encode!([
+         %{
+           "identifier" => "UTS-20",
+           "title" => "Review artifact",
+           "url" => "https://linear.app/utsav/issue/UTS-20/review-artifact",
+           "linear_state" => "Human Review",
+           "project" => "Symphony",
+           "classification" => "ready_for_review",
+           "reason" => "Issue is ready for human review.",
+           "next_action" => "Review the linked artifacts.",
+           "excerpt" => ""
+         },
+         %{
+           "identifier" => "UTS-10",
+           "title" => "Needs repo routing",
+           "url" => "https://linear.app/utsav/issue/UTS-10/needs-repo-routing",
+           "linear_state" => "In Review",
+           "project" => "Symphony",
+           "classification" => "needs_decision",
+           "reason" => "Decision Needed: Add a `Repos:` section to the issue body, then reply `Retry`.",
+           "next_action" => "Answer the decision request.",
+           "excerpt" => "Retry"
+         }
+       ])}
+    end
+
+    server = Module.concat(__MODULE__, :RoutingFirstInbox)
+
+    start_supervised!({AttentionInbox, name: server, fetch_fun: fetch_fun, reply_fun: fn _, _ -> :ok end, auto_refresh: false})
+
+    assert {:ok, snapshot} = AttentionInbox.refresh(server)
+    assert Enum.map(snapshot.items, & &1.identifier) == ["UTS-10", "UTS-20"]
+
+    assert %{
+             priority_rank: 0,
+             priority_label: "P0 Route",
+             priority_reason: "Small routing fix unlocks Symphony dispatch.",
+             action_family: "routing",
+             action_label: "Add repo routing"
+           } = hd(snapshot.items)
+  end
+
   test "approve and deny post guarded reply commands then refresh the cache" do
     reply_agent = start_supervised!({Agent, fn -> [] end})
 

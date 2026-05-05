@@ -646,6 +646,65 @@ defmodule SymphonyElixir.ExtensionsTest do
     end)
   end
 
+  test "dashboard liveview renders prioritized attention summary" do
+    orchestrator_name = Module.concat(__MODULE__, :AttentionDashboardOrchestrator)
+    attention_name = Module.concat(__MODULE__, :DashboardAttentionInbox)
+
+    {:ok, _pid} =
+      StaticOrchestrator.start_link(
+        name: orchestrator_name,
+        snapshot: static_snapshot(),
+        refresh: %{
+          queued: true,
+          coalesced: false,
+          requested_at: DateTime.utc_now(),
+          operations: ["poll"]
+        }
+      )
+
+    fetch_fun = fn ->
+      {:ok,
+       Jason.encode!([
+         %{
+           "identifier" => "UTS-20",
+           "title" => "Review artifact",
+           "url" => "https://linear.app/utsav/issue/UTS-20/review-artifact",
+           "linear_state" => "Human Review",
+           "project" => "Symphony",
+           "classification" => "ready_for_review",
+           "reason" => "Issue is ready for human review.",
+           "next_action" => "Review the linked artifacts.",
+           "excerpt" => ""
+         },
+         %{
+           "identifier" => "UTS-10",
+           "title" => "Needs repo routing",
+           "url" => "https://linear.app/utsav/issue/UTS-10/needs-repo-routing",
+           "linear_state" => "In Review",
+           "project" => "Symphony",
+           "classification" => "needs_decision",
+           "reason" => "Decision Needed: Add a `Repos:` section to the issue body, then reply `Retry`.",
+           "next_action" => "Answer the decision request.",
+           "excerpt" => "Retry"
+         }
+       ])}
+    end
+
+    start_supervised!({AttentionInbox, name: attention_name, fetch_fun: fetch_fun, reply_fun: fn _, _ -> :ok end, auto_refresh: false})
+    assert {:ok, _snapshot} = AttentionInbox.refresh(attention_name)
+
+    start_test_endpoint(orchestrator: orchestrator_name, attention_inbox: attention_name, snapshot_timeout_ms: 50)
+
+    {:ok, _view, html} = live(build_conn(), "/")
+
+    assert html =~ "Operator queue ordered by what unlocks the most work first."
+    assert html =~ "Routing fixes"
+    assert html =~ "Start here"
+    assert html =~ "Add repo routing: UTS-10"
+    assert html =~ "Small routing fix unlocks Symphony dispatch."
+    assert html =~ "P0 Route"
+  end
+
   test "dashboard liveview renders an unavailable state without crashing" do
     start_test_endpoint(
       orchestrator: Module.concat(__MODULE__, :MissingDashboardOrchestrator),

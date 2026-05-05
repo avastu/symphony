@@ -151,7 +151,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
             <div>
               <h2 class="section-title">Attention inbox</h2>
               <p class="section-copy">
-                Prioritized human decisions, blockers, review-ready work, and comments from the cached Linear attention scan.
+                Operator queue ordered by what unlocks the most work first.
               </p>
             </div>
 
@@ -182,12 +182,57 @@ defmodule SymphonyElixirWeb.DashboardLive do
           <%= if @attention.items == [] do %>
             <p class="empty-state">No attention items are currently cached.</p>
           <% else %>
+            <% top_item = List.first(@attention.items) %>
+            <div class="attention-summary" aria-label="Attention priority summary">
+              <div class="attention-summary-item attention-summary-route">
+                <span class="attention-summary-label">Routing fixes</span>
+                <strong class="numeric"><%= attention_action_count(@attention.items, "routing") %></strong>
+              </div>
+              <div class="attention-summary-item attention-summary-blocker">
+                <span class="attention-summary-label">Blockers</span>
+                <strong class="numeric"><%= attention_action_count(@attention.items, "blocker") %></strong>
+              </div>
+              <div class="attention-summary-item attention-summary-review">
+                <span class="attention-summary-label">PR / merge review</span>
+                <strong class="numeric"><%= attention_action_count(@attention.items, "review") %></strong>
+              </div>
+              <div class="attention-summary-item">
+                <span class="attention-summary-label">Total</span>
+                <strong class="numeric"><%= length(@attention.items) %></strong>
+              </div>
+            </div>
+
+            <aside :if={top_item} class="attention-start">
+              <div>
+                <p class="attention-start-label">Start here</p>
+                <h3 class="attention-start-title">
+                  <a href={top_item.url} target="_blank" rel="noreferrer">
+                    <%= top_item.action_label %>: <%= top_item.identifier %>
+                  </a>
+                </h3>
+                <p class="attention-start-copy"><%= top_item.priority_reason %></p>
+              </div>
+              <span class={priority_badge_class(top_item.priority_rank)}>
+                <%= top_item.priority_label %>
+              </span>
+            </aside>
+
             <div class="attention-list">
-              <article :for={item <- @attention.items} class={"attention-item attention-rank-#{item.priority_rank}"}>
+              <article
+                :for={{item, index} <- Enum.with_index(@attention.items)}
+                class={[
+                  "attention-item",
+                  "attention-rank-#{item.priority_rank}",
+                  index == 0 && "attention-item-primary"
+                ]}
+              >
                 <div class="attention-main">
                   <div class="attention-topline">
                     <span class={priority_badge_class(item.priority_rank)}>
                       <%= item.priority_label %>
+                    </span>
+                    <span class="action-badge">
+                      <%= item.action_label %>
                     </span>
                     <span class={attention_classification_class(item.classification)}>
                       <%= item.classification %>
@@ -204,6 +249,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
                     <a href={item.url} target="_blank" rel="noreferrer"><%= item.identifier %>: <%= item.title %></a>
                   </h3>
 
+                  <p class="attention-copy"><strong>Priority:</strong> <%= item.priority_reason %></p>
                   <p class="attention-copy"><strong>Why:</strong> <%= item.reason %></p>
                   <p class="attention-copy"><strong>Next:</strong> <%= item.next_action %></p>
                   <p :if={item.excerpt != ""} class="attention-excerpt"><%= item.excerpt %></p>
@@ -495,6 +541,12 @@ defmodule SymphonyElixirWeb.DashboardLive do
   defp attention_classification_class(classification) do
     "classification-badge classification-#{classification}"
   end
+
+  defp attention_action_count(items, action_family) when is_list(items) do
+    Enum.count(items, &(&1.action_family == action_family))
+  end
+
+  defp attention_action_count(_items, _action_family), do: 0
 
   defp attention_action_success_message(issue_identifier, :approve) do
     "Posted approval for #{issue_identifier}."
