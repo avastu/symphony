@@ -244,9 +244,6 @@ defmodule SymphonyElixir.Orchestrator do
       {:error, reason} ->
         Logger.error("Failed to fetch from Linear: #{inspect(reason)}")
         state
-
-      false ->
-        state
     end
   end
 
@@ -626,8 +623,6 @@ defmodule SymphonyElixir.Orchestrator do
     blocked_by_non_terminal?(issue.blocked_by, terminal_states) or
       (workpad_blocked?(issue) and issue.blocked_by == [])
   end
-
-  defp issue_blocked?(_issue, _terminal_states), do: false
 
   defp workpad_blocked?(%Issue{workpad_state: workpad_state}) when is_binary(workpad_state) do
     normalize_issue_state(workpad_state) == "blocked"

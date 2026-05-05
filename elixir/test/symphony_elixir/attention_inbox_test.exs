@@ -46,7 +46,14 @@ defmodule SymphonyElixir.AttentionInboxTest do
 
     server = Module.concat(__MODULE__, :PrioritizedInbox)
 
-    start_supervised!({AttentionInbox, name: server, fetch_fun: fetch_fun, reply_fun: fn _, _ -> :ok end, auto_refresh: false})
+    opts = [
+      name: server,
+      fetch_fun: fetch_fun,
+      reply_fun: fn _, _ -> :ok end,
+      auto_refresh: false
+    ]
+
+    start_supervised!({AttentionInbox, opts})
 
     assert AttentionInbox.snapshot(server).status == "loading"
     assert {:ok, snapshot} = AttentionInbox.refresh(server)
@@ -91,7 +98,14 @@ defmodule SymphonyElixir.AttentionInboxTest do
 
     server = Module.concat(__MODULE__, :RoutingFirstInbox)
 
-    start_supervised!({AttentionInbox, name: server, fetch_fun: fetch_fun, reply_fun: fn _, _ -> :ok end, auto_refresh: false})
+    opts = [
+      name: server,
+      fetch_fun: fetch_fun,
+      reply_fun: fn _, _ -> :ok end,
+      auto_refresh: false
+    ]
+
+    start_supervised!({AttentionInbox, opts})
 
     assert {:ok, snapshot} = AttentionInbox.refresh(server)
     assert Enum.map(snapshot.items, & &1.identifier) == ["UTS-10", "UTS-20"]

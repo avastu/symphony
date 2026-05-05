@@ -167,8 +167,6 @@ defmodule SymphonyElixir.AgentRunner do
     continuation_issue_state?(issue.state) and !issue_blocked?(issue)
   end
 
-  defp continuation_issue?(_issue), do: false
-
   defp continuation_issue_state?(state_name) when is_binary(state_name) do
     normalized_state = normalize_issue_state(state_name)
 
@@ -182,8 +180,6 @@ defmodule SymphonyElixir.AgentRunner do
     blocked_by_non_terminal?(issue.blocked_by) or
       (workpad_blocked?(issue) and issue.blocked_by == [])
   end
-
-  defp issue_blocked?(_issue), do: false
 
   defp workpad_blocked?(%Issue{workpad_state: workpad_state}) when is_binary(workpad_state) do
     normalize_issue_state(workpad_state) == "blocked"

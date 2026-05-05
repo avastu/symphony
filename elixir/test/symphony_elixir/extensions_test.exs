@@ -489,7 +489,14 @@ defmodule SymphonyElixir.ExtensionsTest do
       :ok
     end
 
-    start_supervised!({AttentionInbox, name: attention_name, fetch_fun: fetch_fun, reply_fun: reply_fun, auto_refresh: false})
+    attention_opts = [
+      name: attention_name,
+      fetch_fun: fetch_fun,
+      reply_fun: reply_fun,
+      auto_refresh: false
+    ]
+
+    start_supervised!({AttentionInbox, attention_opts})
 
     assert {:ok, _snapshot} = AttentionInbox.refresh(attention_name)
 
@@ -690,7 +697,14 @@ defmodule SymphonyElixir.ExtensionsTest do
        ])}
     end
 
-    start_supervised!({AttentionInbox, name: attention_name, fetch_fun: fetch_fun, reply_fun: fn _, _ -> :ok end, auto_refresh: false})
+    attention_opts = [
+      name: attention_name,
+      fetch_fun: fetch_fun,
+      reply_fun: fn _, _ -> :ok end,
+      auto_refresh: false
+    ]
+
+    start_supervised!({AttentionInbox, attention_opts})
     assert {:ok, _snapshot} = AttentionInbox.refresh(attention_name)
 
     start_test_endpoint(orchestrator: orchestrator_name, attention_inbox: attention_name, snapshot_timeout_ms: 50)
