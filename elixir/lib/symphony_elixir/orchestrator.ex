@@ -1707,7 +1707,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp handle_review_check_issue(%State{} = state, %Issue{id: issue_id} = issue) do
     checkpoint = review_checkpoint(issue)
     previous_checkpoint = Map.get(state.review_checkpoints, issue_id)
-    changed? = previous_checkpoint != nil and previous_checkpoint != checkpoint
+    changed? = review_checkpoint_changed?(previous_checkpoint, checkpoint)
 
     state = %{state | review_checkpoints: Map.put(state.review_checkpoints, issue_id, checkpoint)}
     terminal_states = terminal_state_set()
@@ -1862,6 +1862,17 @@ defmodule SymphonyElixir.Orchestrator do
       branch_name: issue.branch_name,
       url: issue.url
     }
+  end
+
+  defp review_checkpoint_changed?(nil, _checkpoint), do: false
+
+  defp review_checkpoint_changed?(previous_checkpoint, checkpoint)
+       when is_map(previous_checkpoint) and is_map(checkpoint) do
+    previous_state = Map.get(previous_checkpoint, :state)
+    current_state = Map.get(checkpoint, :state)
+
+    human_review_state?(previous_state) and human_review_state?(current_state) and
+      Map.drop(previous_checkpoint, [:state]) != Map.drop(checkpoint, [:state])
   end
 
   defp human_review_state?(state_name) when is_binary(state_name) do

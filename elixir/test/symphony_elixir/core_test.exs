@@ -1059,6 +1059,69 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "targeted Human Review check treats return from Rework as review baseline" do
+    previous_memory_issues = Application.get_env(:symphony_elixir, :memory_tracker_issues)
+    previous_memory_recipient = Application.get_env(:symphony_elixir, :memory_tracker_recipient)
+
+    issue = %Issue{
+      id: "issue-uts-110",
+      identifier: "UTS-110",
+      title: "Returned to human review after rework",
+      state: "Human Review",
+      updated_at: ~U[2026-05-06 21:10:00Z],
+      branch_name: "uts-110-rework-loop",
+      url: "https://linear.app/issue/UTS-110"
+    }
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+      Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+      state = %Orchestrator.State{
+        poll_interval_ms: 30_000,
+        max_concurrent_agents: 1,
+        claimed: MapSet.new(["issue-uts-110"]),
+        review_checkpoints: %{
+          "issue-uts-110" => %{
+            state: "Rework",
+            workpad_state: nil,
+            updated_at: ~U[2026-05-06 21:05:00Z],
+            branch_name: "uts-110-rework-loop",
+            url: "https://linear.app/issue/UTS-110"
+          }
+        },
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+        codex_rate_limits: nil
+      }
+
+      assert {:reply, first_payload, first_state} =
+               Orchestrator.handle_call({:request_review_check, "issue-uts-110"}, {self(), make_ref()}, state)
+
+      assert first_payload.queued == false
+      assert first_payload.reason == "review_checkpoint_unchanged"
+      refute_receive {:memory_tracker_state_update, "issue-uts-110", "Rework"}, 50
+      refute MapSet.member?(first_state.claimed, "issue-uts-110")
+      assert first_state.review_checkpoints["issue-uts-110"].state == "Human Review"
+
+      changed_issue = %{issue | updated_at: ~U[2026-05-06 21:15:00Z]}
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [changed_issue])
+
+      second_state = %{first_state | claimed: MapSet.new(["issue-uts-110"])}
+
+      assert {:reply, second_payload, updated_state} =
+               Orchestrator.handle_call({:request_review_check, "issue-uts-110"}, {self(), make_ref()}, second_state)
+
+      assert second_payload.queued == true
+      assert second_payload.reason == "review_checkpoint_changed_rework"
+      assert_receive {:memory_tracker_state_update, "issue-uts-110", "Rework"}
+      assert updated_state.review_checkpoints["issue-uts-110"].state == "Rework"
+    after
+      restore_app_env(:memory_tracker_issues, previous_memory_issues)
+      restore_app_env(:memory_tracker_recipient, previous_memory_recipient)
+    end
+  end
+
   test "targeted Human Review check keeps local publish-blocked work out of Rework" do
     previous_memory_issues = Application.get_env(:symphony_elixir, :memory_tracker_issues)
     previous_memory_recipient = Application.get_env(:symphony_elixir, :memory_tracker_recipient)
