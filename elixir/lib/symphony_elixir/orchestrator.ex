@@ -212,7 +212,7 @@ defmodule SymphonyElixir.Orchestrator do
         state
 
       {:error, :missing_linear_project_slug} ->
-        Logger.error("Linear project slug missing in WORKFLOW.md")
+        Logger.error("Linear project configuration missing in WORKFLOW.md")
         state
 
       {:error, :missing_tracker_kind} ->
@@ -486,6 +486,7 @@ defmodule SymphonyElixir.Orchestrator do
       |> terminate_running_issue(issue_id, false)
       |> schedule_issue_retry(issue_id, next_attempt, %{
         identifier: identifier,
+        project_label: Issue.project_label(Map.get(running_entry, :issue)),
         error: "stalled for #{elapsed_ms}ms without codex activity"
       })
     else
@@ -762,6 +763,7 @@ defmodule SymphonyElixir.Orchestrator do
 
         schedule_issue_retry(state, issue.id, next_attempt, %{
           identifier: issue.identifier,
+          project_label: Issue.project_label(issue),
           error: "failed to spawn agent: #{inspect(reason)}",
           worker_host: worker_host
         })
@@ -805,6 +807,7 @@ defmodule SymphonyElixir.Orchestrator do
     retry_token = make_ref()
     due_at_ms = System.monotonic_time(:millisecond) + delay_ms
     identifier = pick_retry_identifier(issue_id, previous_retry, metadata)
+    project_label = metadata[:project_label] || Map.get(previous_retry, :project_label)
     error = pick_retry_error(previous_retry, metadata)
     worker_host = pick_retry_worker_host(previous_retry, metadata)
     workspace_path = pick_retry_workspace_path(previous_retry, metadata)
@@ -828,6 +831,7 @@ defmodule SymphonyElixir.Orchestrator do
             retry_token: retry_token,
             due_at_ms: due_at_ms,
             identifier: identifier,
+            project_label: project_label,
             error: error,
             delay_type: metadata[:delay_type],
             last_state: metadata[:last_state],
@@ -1162,6 +1166,7 @@ defmodule SymphonyElixir.Orchestrator do
           issue_id: issue_id,
           identifier: metadata.identifier,
           state: metadata.issue.state,
+          project_label: Issue.project_label(metadata.issue),
           worker_host: Map.get(metadata, :worker_host),
           workspace_path: Map.get(metadata, :workspace_path),
           session_id: metadata.session_id,
@@ -1186,6 +1191,7 @@ defmodule SymphonyElixir.Orchestrator do
           attempt: attempt,
           due_in_ms: max(0, due_at_ms - now_ms),
           identifier: Map.get(retry, :identifier),
+          project_label: Map.get(retry, :project_label),
           error: Map.get(retry, :error),
           worker_host: Map.get(retry, :worker_host),
           workspace_path: Map.get(retry, :workspace_path)
@@ -1386,6 +1392,7 @@ defmodule SymphonyElixir.Orchestrator do
 
       schedule_issue_retry(state, issue_id, 1, %{
         identifier: running_entry.identifier,
+        project_label: Issue.project_label(running_entry.issue),
         delay_type: :continuation,
         last_state: running_entry.issue.state,
         worker_host: Map.get(running_entry, :worker_host),
@@ -1405,6 +1412,7 @@ defmodule SymphonyElixir.Orchestrator do
 
     schedule_issue_retry(state, issue_id, next_attempt, %{
       identifier: running_entry.identifier,
+      project_label: Issue.project_label(running_entry.issue),
       error: "agent exited: #{inspect(reason)}",
       worker_host: Map.get(running_entry, :worker_host),
       workspace_path: Map.get(running_entry, :workspace_path)

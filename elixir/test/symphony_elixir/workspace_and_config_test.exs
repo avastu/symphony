@@ -445,6 +445,266 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert_receive {:fetch_issue_states_page, ^query, %{ids: ^second_batch_ids, first: 5, relationFirst: 50}}
   end
 
+  test "linear client polls each managed project and dedupes duplicate issue ids" do
+    projects = [
+      %Config.TrackerProject{name: "Beta Launch Validation", slug: "beta", source: "tracker.managed_projects"},
+      %Config.TrackerProject{name: "Iris Personal Agent Stack", slug: "iris", source: "tracker.managed_projects"}
+    ]
+
+    raw_issue = fn id, identifier, project_name, project_slug ->
+      %{
+        "id" => id,
+        "identifier" => identifier,
+        "title" => "Issue #{identifier}",
+        "description" => "Description #{identifier}",
+        "state" => %{"name" => "Todo"},
+        "project" => %{"name" => project_name, "slugId" => project_slug, "url" => "https://linear.app/project/#{project_slug}"},
+        "labels" => %{"nodes" => []},
+        "inverseRelations" => %{"nodes" => []}
+      }
+    end
+
+    graphql_fun = fn query, variables ->
+      send(self(), {:managed_project_poll, query, variables})
+
+      nodes =
+        case variables.projectValue do
+          "beta" ->
+            [
+              raw_issue.("issue-1", "UTS-1", "Beta Launch Validation", "beta"),
+              raw_issue.("issue-shared", "UTS-99", "Beta Launch Validation", "beta")
+            ]
+
+          "iris" ->
+            [
+              raw_issue.("issue-shared", "UTS-99", "Iris Personal Agent Stack", "iris"),
+              raw_issue.("issue-101", "UTS-101", "Iris Personal Agent Stack", "iris")
+            ]
+        end
+
+      {:ok,
+       %{
+         "data" => %{
+           "issues" => %{
+             "nodes" => nodes,
+             "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}
+           }
+         }
+       }}
+    end
+
+    assert {:ok, issues} = Client.fetch_by_states_for_test(projects, ["Todo"], graphql_fun)
+
+    assert Enum.map(issues, & &1.identifier) == ["UTS-1", "UTS-99", "UTS-101"]
+    assert Enum.map(issues, & &1.id) == ["issue-1", "issue-shared", "issue-101"]
+    assert Enum.find(issues, &(&1.identifier == "UTS-101")).project_name == "Iris Personal Agent Stack"
+
+    assert_receive {:managed_project_poll, query, %{projectValue: "beta", stateNames: ["Todo"], first: 50}}
+    assert query =~ "slugId"
+
+    assert_receive {:managed_project_poll, ^query, %{projectValue: "iris", stateNames: ["Todo"], first: 50}}
+  end
+
+  test "linear client can poll a non-first managed project for retry rediscovery" do
+    projects = [
+      %Config.TrackerProject{name: "Beta Launch Validation", slug: "beta", source: "tracker.managed_projects"},
+      %Config.TrackerProject{name: "Iris Personal Agent Stack", slug: "iris", source: "tracker.managed_projects"}
+    ]
+
+    graphql_fun = fn _query, variables ->
+      nodes =
+        case variables.projectValue do
+          "beta" ->
+            []
+
+          "iris" ->
+            [
+              %{
+                "id" => "issue-101",
+                "identifier" => "UTS-101",
+                "title" => "Iris first implementation issue",
+                "state" => %{"name" => "Todo"},
+                "project" => %{"name" => "Iris Personal Agent Stack", "slugId" => "iris"},
+                "labels" => %{"nodes" => []},
+                "inverseRelations" => %{"nodes" => []}
+              }
+            ]
+        end
+
+      {:ok,
+       %{
+         "data" => %{
+           "issues" => %{
+             "nodes" => nodes,
+             "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}
+           }
+         }
+       }}
+    end
+
+    assert {:ok, [%Issue{identifier: "UTS-101", project_slug: "iris"}]} =
+             Client.fetch_by_states_for_test(projects, ["Todo"], graphql_fun)
+  end
+
+  test "linear client polls name-only managed project entries" do
+    projects = [
+      %Config.TrackerProject{name: "Iris Personal Agent Stack", slug: nil, source: "tracker.managed_projects"}
+    ]
+
+    graphql_fun = fn query, variables ->
+      send(self(), {:name_project_poll, query, variables})
+
+      {:ok,
+       %{
+         "data" => %{
+           "issues" => %{
+             "nodes" => [
+               %{
+                 "id" => "issue-name-only",
+                 "identifier" => "UTS-101",
+                 "title" => "Iris by project name",
+                 "state" => %{"name" => "Todo"},
+                 "labels" => %{"nodes" => []},
+                 "inverseRelations" => %{"nodes" => []}
+               }
+             ],
+             "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}
+           }
+         }
+       }}
+    end
+
+    assert {:ok, [%Issue{identifier: "UTS-101", project_name: "Iris Personal Agent Stack"}]} =
+             Client.fetch_by_states_for_test(projects, ["Todo"], graphql_fun)
+
+    assert_receive {:name_project_poll, query, %{projectValue: "Iris Personal Agent Stack"}}
+    assert query =~ "SymphonyLinearPollByProjectName"
+    assert query =~ "name: {eq: $projectValue}"
+  end
+
+  test "linear client paginates cursor results within a managed project" do
+    projects = [
+      %Config.TrackerProject{name: "Beta Launch Validation", slug: "beta", source: "tracker.managed_projects"}
+    ]
+
+    raw_issue = fn id, identifier ->
+      %{
+        "id" => id,
+        "identifier" => identifier,
+        "title" => "Issue #{identifier}",
+        "state" => %{"name" => "Todo"},
+        "project" => %{"name" => "Beta Launch Validation", "slugId" => "beta"},
+        "labels" => %{"nodes" => []},
+        "inverseRelations" => %{"nodes" => []}
+      }
+    end
+
+    graphql_fun = fn _query, variables ->
+      send(self(), {:cursor_project_poll, variables})
+
+      case variables.after do
+        nil ->
+          {:ok,
+           %{
+             "data" => %{
+               "issues" => %{
+                 "nodes" => [raw_issue.("issue-1", "UTS-1")],
+                 "pageInfo" => %{"hasNextPage" => true, "endCursor" => "cursor-1"}
+               }
+             }
+           }}
+
+        "cursor-1" ->
+          {:ok,
+           %{
+             "data" => %{
+               "issues" => %{
+                 "nodes" => [raw_issue.("issue-2", "UTS-2")],
+                 "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}
+               }
+             }
+           }}
+      end
+    end
+
+    assert {:ok, issues} = Client.fetch_by_states_for_test(projects, ["Todo"], graphql_fun)
+    assert Enum.map(issues, & &1.identifier) == ["UTS-1", "UTS-2"]
+
+    assert_receive {:cursor_project_poll, %{projectValue: "beta", after: nil}}
+    assert_receive {:cursor_project_poll, %{projectValue: "beta", after: "cursor-1"}}
+  end
+
+  test "linear client fails fast when any managed project poll fails" do
+    projects = [
+      %Config.TrackerProject{name: "Beta Launch Validation", slug: "beta", source: "tracker.managed_projects"},
+      %Config.TrackerProject{name: "Iris Personal Agent Stack", slug: "iris", source: "tracker.managed_projects"}
+    ]
+
+    graphql_fun = fn _query, variables ->
+      send(self(), {:fail_fast_project_poll, variables.projectValue})
+
+      case variables.projectValue do
+        "beta" -> {:error, :linear_timeout}
+        "iris" -> flunk("expected fail-fast behavior to avoid polling later projects")
+      end
+    end
+
+    assert {:error, :linear_timeout} = Client.fetch_by_states_for_test(projects, ["Todo"], graphql_fun)
+    assert_receive {:fail_fast_project_poll, "beta"}
+    refute_receive {:fail_fast_project_poll, "iris"}
+  end
+
+  test "linear client reports missing page info instead of losing accumulated pages" do
+    projects = [
+      %Config.TrackerProject{name: "Beta Launch Validation", slug: "beta", source: "tracker.managed_projects"}
+    ]
+
+    graphql_fun = fn _query, variables ->
+      case variables.after do
+        nil ->
+          {:ok,
+           %{
+             "data" => %{
+               "issues" => %{
+                 "nodes" => [
+                   %{
+                     "id" => "issue-1",
+                     "identifier" => "UTS-1",
+                     "title" => "First page",
+                     "state" => %{"name" => "Todo"},
+                     "labels" => %{"nodes" => []},
+                     "inverseRelations" => %{"nodes" => []}
+                   }
+                 ],
+                 "pageInfo" => %{"hasNextPage" => true, "endCursor" => "cursor-1"}
+               }
+             }
+           }}
+
+        "cursor-1" ->
+          {:ok,
+           %{
+             "data" => %{
+               "issues" => %{
+                 "nodes" => [
+                   %{
+                     "id" => "issue-2",
+                     "identifier" => "UTS-2",
+                     "title" => "Malformed page",
+                     "state" => %{"name" => "Todo"},
+                     "labels" => %{"nodes" => []},
+                     "inverseRelations" => %{"nodes" => []}
+                   }
+                 ]
+               }
+             }
+           }}
+      end
+    end
+
+    assert {:error, :linear_missing_page_info} = Client.fetch_by_states_for_test(projects, ["Todo"], graphql_fun)
+  end
+
   test "linear client logs response bodies for non-200 graphql responses" do
     log =
       ExUnit.CaptureLog.capture_log(fn ->
@@ -554,6 +814,36 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     }
 
     refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+  end
+
+  test "claimed and running guards prevent duplicate dispatch for the same issue id" do
+    issue = %Issue{
+      id: "duplicate-issue-id",
+      identifier: "UTS-114",
+      title: "Configured through two projects",
+      state: "Todo"
+    }
+
+    claimed_state = %Orchestrator.State{
+      max_concurrent_agents: 3,
+      running: %{},
+      claimed: MapSet.new(["duplicate-issue-id"]),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{}
+    }
+
+    running_state = %{
+      claimed_state
+      | claimed: MapSet.new(),
+        running: %{
+          "duplicate-issue-id" => %{
+            issue: issue
+          }
+        }
+    }
+
+    refute Orchestrator.should_dispatch_issue_for_test(issue, claimed_state)
+    refute Orchestrator.should_dispatch_issue_for_test(issue, running_state)
   end
 
   test "blocked workpad with terminal blocker resumes dispatch eligibility" do

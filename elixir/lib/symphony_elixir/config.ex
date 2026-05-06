@@ -33,6 +33,18 @@ defmodule SymphonyElixir.Config do
           turn_sandbox_policy: map()
         }
 
+  defmodule TrackerProject do
+    @moduledoc false
+
+    defstruct [:name, :slug, :source]
+
+    @type t :: %__MODULE__{
+            name: String.t() | nil,
+            slug: String.t() | nil,
+            source: String.t() | nil
+          }
+  end
+
   @spec settings() :: {:ok, Schema.t()} | {:error, term()}
   def settings do
     case Workflow.current() do
@@ -67,6 +79,12 @@ defmodule SymphonyElixir.Config do
   end
 
   def max_concurrent_agents_for_state(_state_name), do: settings!().agent.max_concurrent_agents
+
+  @spec tracker_projects() :: [TrackerProject.t()]
+  def tracker_projects, do: tracker_projects(settings!())
+
+  @spec tracker_projects(Schema.t()) :: [TrackerProject.t()]
+  def tracker_projects(%Schema{} = settings), do: tracker_projects_from_tracker(settings.tracker)
 
   @spec codex_turn_sandbox_policy(Path.t() | nil) :: map()
   def codex_turn_sandbox_policy(workspace \\ nil) do
@@ -132,13 +150,115 @@ defmodule SymphonyElixir.Config do
       settings.tracker.kind == "linear" and not is_binary(settings.tracker.api_key) ->
         {:error, :missing_linear_api_token}
 
-      settings.tracker.kind == "linear" and not is_binary(settings.tracker.project_slug) ->
+      settings.tracker.kind == "linear" and tracker_projects(settings) == [] ->
         {:error, :missing_linear_project_slug}
 
       true ->
         :ok
     end
   end
+
+  defp tracker_projects_from_tracker(tracker) do
+    cond do
+      configured_projects?(tracker.managed_projects) ->
+        tracker.managed_projects
+        |> Enum.reject(&inactive_project_entry?/1)
+        |> Enum.map(&project_from_entry(&1, "tracker.managed_projects"))
+        |> active_projects()
+        |> dedupe_projects()
+
+      configured_projects?(tracker.project_slugs) ->
+        tracker.project_slugs
+        |> Enum.map(&project_from_entry(&1, "tracker.project_slugs"))
+        |> active_projects()
+        |> dedupe_projects()
+
+      true ->
+        tracker.project_slug
+        |> project_from_entry("tracker.project_slug")
+        |> List.wrap()
+        |> active_projects()
+        |> dedupe_projects()
+    end
+  end
+
+  defp configured_projects?(entries) when is_list(entries) do
+    entries
+    |> Enum.reject(&inactive_project_entry?/1)
+    |> Enum.any?(&(project_from_entry(&1, "tracker") |> active_project?()))
+  end
+
+  defp configured_projects?(_entries), do: false
+
+  defp inactive_project_entry?(%{} = entry), do: Map.get(entry, "active") == false
+  defp inactive_project_entry?(_entry), do: false
+
+  defp project_from_entry(nil, _source), do: nil
+
+  defp project_from_entry(%{} = entry, source) do
+    %TrackerProject{
+      name: first_present(entry, ["name", "project", "project_name"]),
+      slug: first_present(entry, ["slug", "slug_id", "slugId", "project_slug"]),
+      source: source
+    }
+  end
+
+  defp project_from_entry(entry, source) do
+    %TrackerProject{name: nil, slug: normalize_project_value(entry), source: source}
+  end
+
+  defp first_present(entry, keys) when is_map(entry) and is_list(keys) do
+    Enum.find_value(keys, fn key -> normalize_project_value(Map.get(entry, key)) end)
+  end
+
+  defp normalize_project_value(nil), do: nil
+
+  defp normalize_project_value(value) when is_binary(value) do
+    case String.trim(value) do
+      "" -> nil
+      trimmed -> trimmed
+    end
+  end
+
+  defp normalize_project_value(value) when is_atom(value), do: value |> Atom.to_string() |> normalize_project_value()
+  defp normalize_project_value(value) when is_integer(value), do: Integer.to_string(value)
+  defp normalize_project_value(_value), do: nil
+
+  defp active_projects(projects) when is_list(projects), do: Enum.filter(projects, &active_project?/1)
+
+  defp active_project?(%TrackerProject{name: name, slug: slug}) do
+    is_binary(name) or is_binary(slug)
+  end
+
+  defp active_project?(_project), do: false
+
+  defp dedupe_projects(projects) when is_list(projects) do
+    projects
+    |> Enum.reduce({MapSet.new(), []}, fn project, {seen, acc} ->
+      key = project_dedupe_key(project)
+
+      cond do
+        is_nil(key) ->
+          {seen, acc}
+
+        MapSet.member?(seen, key) ->
+          {seen, acc}
+
+        true ->
+          {MapSet.put(seen, key), [project | acc]}
+      end
+    end)
+    |> elem(1)
+    |> Enum.reverse()
+  end
+
+  defp project_dedupe_key(%TrackerProject{slug: slug}) when is_binary(slug), do: {:slug, slug}
+
+  defp project_dedupe_key(%TrackerProject{name: name}) when is_binary(name) do
+    {:name, String.downcase(name)}
+  end
+
+  defp project_dedupe_key(_project), do: nil
 
   defp format_config_error(reason) do
     case reason do

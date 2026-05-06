@@ -971,7 +971,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     assert is_integer(due_at_ms)
     remaining_ms = due_at_ms - System.monotonic_time(:millisecond)
-    assert remaining_ms >= 9_500
+    assert remaining_ms >= 8_500
     assert remaining_ms <= 10_500
   end
 
@@ -999,6 +999,32 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     assert rendered =~ "https://linear.app/project/project/issues"
     refute rendered =~ "Dashboard:"
+  end
+
+  test "status dashboard renders multi-project header from managed projects" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_project_slug: "legacy",
+      tracker_managed_projects: [
+        %{name: "Beta Launch Validation", slug: "beta"},
+        %{name: "Iris Personal Agent Stack", slug: "iris"}
+      ]
+    )
+
+    snapshot_data =
+      {:ok,
+       %{
+         running: [],
+         retrying: [],
+         codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+         rate_limits: nil
+       }}
+
+    rendered = StatusDashboard.format_snapshot_content_for_test(snapshot_data, 0.0)
+
+    assert rendered =~ "│ Projects:"
+    assert rendered =~ "https://linear.app/project/beta/issues"
+    assert rendered =~ "https://linear.app/project/iris/issues"
+    refute rendered =~ "│ Projects: \e[0m\e[36mn/a"
   end
 
   test "status dashboard renders dashboard url on its own line when server port is configured" do

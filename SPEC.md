@@ -1158,8 +1158,13 @@ Linear-specific requirements for `tracker.kind == "linear"`:
 - `tracker.kind == "linear"`
 - GraphQL endpoint (default `https://api.linear.app/graphql`)
 - Auth token sent in `Authorization` header
-- `tracker.project_slug` maps to Linear project `slugId`
-- Candidate issue query filters project using `project: { slugId: { eq: $projectSlug } }`
+- Linear polling resolves an explicit managed project set from `tracker.managed_projects`,
+  then `tracker.project_slugs`, then legacy `tracker.project_slug`
+- `tracker.project_slug` and managed project `slug` values map to Linear project `slugId`
+- Candidate issue queries filter one configured project at a time using the selected project
+  `slugId` or name
+- Duplicate issues returned through repeated project config entries are merged by stable Linear
+  issue ID before dispatch
 - Issue-state refresh query uses GraphQL issue IDs with variable type `[ID!]`
 - Pagination REQUIRED for candidate issues
 - Page size default: `50`
@@ -1972,10 +1977,11 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 
 ### 17.3 Issue Tracker Client
 
-- Candidate issue fetch uses active states and project slug
-- Linear query uses the specified project filter field (`slugId`)
+- Candidate issue fetch uses active states and the configured managed project set
+- Linear query uses the specified project filter field (`slugId` for slug-backed projects)
 - Empty `fetch_issues_by_states([])` returns empty without API call
 - Pagination preserves order across multiple pages
+- Multi-project result merging preserves first-seen issue order while deduping by Linear issue ID
 - Blockers are normalized from inverse relations of type `blocks`
 - Labels are normalized to lowercase
 - Issue state refresh by ID returns minimal normalized issues
