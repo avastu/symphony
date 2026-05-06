@@ -150,7 +150,7 @@ Use these statuses for Symphony-managed work:
 | `Done` | Completed terminal state. | `done` / `done` |
 | `Canceled` / `Cancelled` / `Closed` / `Duplicate` | Terminal non-completion states; stop and clean up when appropriate. | `canceled`, `failed`, or `done` as recorded in the workpad |
 
-`tracker.active_states` must include `Todo`, `In Progress`, `Rework`, and `Merging`; it must not include stable review states such as `Human Review` or legacy `In Review`. `tracker.continuation_states` should match the implementation states that may chain or retry automatically: `Todo`, `In Progress`, `Rework`, and `Merging`. Human approval, review comments, PR check transitions, review-thread changes, and PR head changes should wake a one-shot review/checkpoint path instead of the normal active polling loop. Terminal states must stay out of both lists.
+`tracker.active_states` must include `Todo`, `In Progress`, `Rework`, and `Merging`; it must not include stable review states such as `Human Review` or legacy `In Review`. `tracker.continuation_states` should match the implementation states that may chain or retry automatically: `Todo`, `In Progress`, `Rework`, and `Merging`. Human approval, actionable review commands, PR check transitions, review-thread changes, and PR head changes should wake a one-shot review/checkpoint path instead of the normal active polling loop. Status-only handoff comments on `ready_for_review` packets must remain parked until an explicit rework command or review signal appears. Terminal states must stay out of both lists.
 
 Migration notes for a running control plane:
 
@@ -168,7 +168,7 @@ Migration notes for a running control plane:
    - `Todo` -> immediately move to `In Progress`, then ensure bootstrap workpad comment exists (create if missing), then start execution flow.
      - If PR is already attached, start by reviewing all open PR comments and deciding required changes vs explicit pushback responses.
    - `In Progress` -> continue execution flow from current scratchpad comment.
-   - `Human Review` -> wait for event/checkpoint wakeups; if new PR review feedback, check annotations, review comments, or human change requests are detected, move to `Rework` and address them.
+   - `Human Review` -> wait for event/checkpoint wakeups; if new PR review feedback, check annotations, or explicit human change requests such as `Revise plan:`, `Approved with change:`, `Answer:`, or `Retry` are detected, move to `Rework` and address them. Do not move `ready_for_review` packets to `Rework` solely because Linear `updatedAt` changed from a status-only handoff or automation note.
    - `Merging` -> on entry, open and follow `.codex/skills/land/SKILL.md`; do not call `gh pr merge` directly.
    - `Rework` -> run rework flow.
    - `Done` -> do nothing and shut down.
@@ -289,7 +289,7 @@ Use this only when completion is blocked by missing required tools or missing au
 ## Step 3: Human Review and merge handling
 
 1. When the issue is in `Human Review`, do not code or change ticket content unless a supported review/check threshold moves the issue to `Rework`/`Merging` or triggers a one-shot review-check turn.
-2. Do not repeatedly dispatch stable `Human Review` issues. The control plane may scan review/checkpoint metadata; if it detects a meaningful change such as a new Utsav comment, PR checks completing, new unresolved review feedback, check annotations, or PR head SHA changes, it must move the issue to `Rework` before dispatching the agent to address the feedback.
+2. Do not repeatedly dispatch stable `Human Review` issues. The control plane may scan review/checkpoint metadata; if it detects a meaningful change such as an explicit Utsav change command, PR checks completing, new unresolved review feedback, check annotations, or PR head SHA changes, it must move the issue to `Rework` before dispatching the agent to address the feedback. Status-only comments on a workpad `State: ready_for_review` packet are non-action review boundaries and must not trigger `Rework`.
 3. If review feedback requires changes, move the issue to `Rework` and follow the rework flow.
 4. If approved, human moves the issue to `Merging`.
 5. When the issue is in `Merging`, open and follow `.codex/skills/land/SKILL.md`, then run the `land` skill in a loop until the PR is merged. Do not call `gh pr merge` directly.

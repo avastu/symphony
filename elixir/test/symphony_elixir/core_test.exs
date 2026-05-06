@@ -1228,6 +1228,113 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "targeted Human Review check keeps ready review packets out of Rework without actionable feedback" do
+    previous_memory_issues = Application.get_env(:symphony_elixir, :memory_tracker_issues)
+    previous_memory_recipient = Application.get_env(:symphony_elixir, :memory_tracker_recipient)
+
+    issue = %Issue{
+      id: "issue-uts-128",
+      identifier: "UTS-128",
+      title: "Durable approval runtime ready for review",
+      state: "Human Review",
+      workpad_state: "ready_for_review",
+      updated_at: ~U[2026-05-06 23:18:37Z],
+      branch_name: "uts-128-hermes-companion-vertical",
+      url: "https://linear.app/issue/UTS-128"
+    }
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+      Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+      state = %Orchestrator.State{
+        poll_interval_ms: 30_000,
+        max_concurrent_agents: 1,
+        claimed: MapSet.new(["issue-uts-128"]),
+        review_checkpoints: %{
+          "issue-uts-128" => %{
+            state: "Human Review",
+            workpad_state: "ready_for_review",
+            updated_at: ~U[2026-05-06 23:10:51Z],
+            branch_name: "uts-128-hermes-companion-vertical",
+            url: "https://linear.app/issue/UTS-128"
+          }
+        },
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+        codex_rate_limits: nil
+      }
+
+      assert {:reply, payload, updated_state} =
+               Orchestrator.handle_call({:request_review_check, "issue-uts-128"}, {self(), make_ref()}, state)
+
+      assert payload.queued == false
+      assert payload.reason == "ready_review_boundary"
+      assert payload.operations == ["review_check", "workpad_state:ready_for_review"]
+      refute_receive {:memory_tracker_state_update, "issue-uts-128", "Rework"}, 50
+      refute MapSet.member?(updated_state.claimed, "issue-uts-128")
+      assert updated_state.review_checkpoints["issue-uts-128"].state == "Human Review"
+      assert updated_state.review_checkpoints["issue-uts-128"].workpad_state == "ready_for_review"
+    after
+      restore_app_env(:memory_tracker_issues, previous_memory_issues)
+      restore_app_env(:memory_tracker_recipient, previous_memory_recipient)
+    end
+  end
+
+  test "targeted Human Review check moves ready review packets to Rework for actionable feedback" do
+    previous_memory_issues = Application.get_env(:symphony_elixir, :memory_tracker_issues)
+    previous_memory_recipient = Application.get_env(:symphony_elixir, :memory_tracker_recipient)
+
+    issue = %Issue{
+      id: "issue-uts-129",
+      identifier: "UTS-129",
+      title: "Review packet with requested change",
+      state: "Human Review",
+      workpad_state: "ready_for_review",
+      review_action: "rework:1778109517000000",
+      updated_at: ~U[2026-05-06 23:18:37Z],
+      branch_name: "uts-129-review-change",
+      url: "https://linear.app/issue/UTS-129"
+    }
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+      Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+      state = %Orchestrator.State{
+        poll_interval_ms: 30_000,
+        max_concurrent_agents: 1,
+        claimed: MapSet.new(["issue-uts-129"]),
+        review_checkpoints: %{
+          "issue-uts-129" => %{
+            state: "Human Review",
+            workpad_state: "ready_for_review",
+            review_action: nil,
+            updated_at: ~U[2026-05-06 23:10:51Z],
+            branch_name: "uts-129-review-change",
+            url: "https://linear.app/issue/UTS-129"
+          }
+        },
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+        codex_rate_limits: nil
+      }
+
+      assert {:reply, payload, updated_state} =
+               Orchestrator.handle_call({:request_review_check, "issue-uts-129"}, {self(), make_ref()}, state)
+
+      assert payload.queued == true
+      assert payload.reason == "review_checkpoint_changed_rework"
+      assert payload.operations == ["review_check", "state:Rework", "dispatch"]
+      assert_receive {:memory_tracker_state_update, "issue-uts-129", "Rework"}
+      assert MapSet.member?(updated_state.claimed, "issue-uts-129")
+      assert updated_state.review_checkpoints["issue-uts-129"].state == "Rework"
+    after
+      restore_app_env(:memory_tracker_issues, previous_memory_issues)
+      restore_app_env(:memory_tracker_recipient, previous_memory_recipient)
+    end
+  end
+
   test "select_worker_host_for_test skips full ssh hosts under the shared per-host cap" do
     write_workflow_file!(Workflow.workflow_file_path(),
       worker_ssh_hosts: ["worker-a", "worker-b"],
