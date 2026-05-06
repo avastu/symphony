@@ -816,6 +816,26 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     refute Orchestrator.should_dispatch_issue_for_test(issue, state)
   end
 
+  test "issue with local publish-blocked workpad state is not dispatch-eligible" do
+    state = %Orchestrator.State{
+      max_concurrent_agents: 3,
+      running: %{},
+      claimed: MapSet.new(),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{}
+    }
+
+    issue = %Issue{
+      id: "ready-local-workpad-1",
+      identifier: "UTS-112",
+      title: "Validated local work waiting on publish infrastructure",
+      state: "Rework",
+      workpad_state: "ready_for_review_local"
+    }
+
+    refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+  end
+
   test "claimed and running guards prevent duplicate dispatch for the same issue id" do
     issue = %Issue{
       id: "duplicate-issue-id",

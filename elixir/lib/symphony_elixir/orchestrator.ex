@@ -797,6 +797,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp issue_blocked?(%Issue{} = issue, terminal_states) do
     blocked_by_non_terminal?(issue.blocked_by, terminal_states) or
+      workpad_publish_blocked?(issue) or
       (workpad_blocked?(issue) and issue.blocked_by == [])
   end
 
@@ -805,6 +806,12 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp workpad_blocked?(_issue), do: false
+
+  defp workpad_publish_blocked?(%Issue{workpad_state: workpad_state}) when is_binary(workpad_state) do
+    normalize_issue_state(workpad_state) == "ready_for_review_local"
+  end
+
+  defp workpad_publish_blocked?(_issue), do: false
 
   defp blocked_by_non_terminal?(blockers, terminal_states) when is_list(blockers) do
     Enum.any?(blockers, fn
@@ -1652,21 +1659,8 @@ defmodule SymphonyElixir.Orchestrator do
           dispatch_issue(state, issue, %{delay_type: :review_check}, nil)
         }
 
-      human_review_state?(issue.state) and changed? ->
-        transition_review_issue_to_rework(state, issue)
-
       human_review_state?(issue.state) ->
-        {
-          %{
-            queued: false,
-            coalesced: true,
-            issue_id: issue_id,
-            issue_identifier: issue.identifier,
-            reason: "review_checkpoint_unchanged",
-            operations: ["review_check"]
-          },
-          release_issue_claim(state, issue_id)
-        }
+        handle_human_review_check_issue(state, issue, changed?)
 
       true ->
         {
@@ -1676,6 +1670,39 @@ defmodule SymphonyElixir.Orchestrator do
             issue_id: issue_id,
             issue_identifier: issue.identifier,
             reason: "not_dispatchable",
+            operations: ["review_check"]
+          },
+          release_issue_claim(state, issue_id)
+        }
+    end
+  end
+
+  defp handle_human_review_check_issue(%State{} = state, %Issue{id: issue_id} = issue, changed?) do
+    cond do
+      workpad_publish_blocked?(issue) ->
+        {
+          %{
+            queued: false,
+            coalesced: false,
+            issue_id: issue_id,
+            issue_identifier: issue.identifier,
+            reason: "publish_blocked_local_review",
+            operations: ["review_check", "workpad_state:ready_for_review_local"]
+          },
+          release_issue_claim(state, issue_id)
+        }
+
+      changed? ->
+        transition_review_issue_to_rework(state, issue)
+
+      true ->
+        {
+          %{
+            queued: false,
+            coalesced: true,
+            issue_id: issue_id,
+            issue_identifier: issue.identifier,
+            reason: "review_checkpoint_unchanged",
             operations: ["review_check"]
           },
           release_issue_claim(state, issue_id)
@@ -1750,6 +1777,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp review_checkpoint(%Issue{} = issue) do
     %{
       state: issue.state,
+      workpad_state: issue.workpad_state,
       updated_at: issue.updated_at,
       branch_name: issue.branch_name,
       url: issue.url
