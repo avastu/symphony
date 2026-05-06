@@ -314,6 +314,7 @@ defmodule SymphonyElixir.StatusDashboard do
           {:ok,
            %{
              running: running,
+             pending_slot: Map.get(snapshot, :pending_slot, []),
              retrying: retrying,
              codex_totals: codex_totals,
              rate_limits: Map.get(snapshot, :rate_limits),
@@ -334,6 +335,7 @@ defmodule SymphonyElixir.StatusDashboard do
   defp format_snapshot_content(snapshot_data, tps, terminal_columns_override \\ nil) do
     case snapshot_data do
       {:ok, %{running: running, retrying: retrying, codex_totals: codex_totals} = snapshot} ->
+        pending_slot = Map.get(snapshot, :pending_slot, [])
         rate_limits = Map.get(snapshot, :rate_limits)
         deploy_pending = Map.get(snapshot, :deploy_pending)
         project_link_lines = format_project_link_lines()
@@ -346,7 +348,15 @@ defmodule SymphonyElixir.StatusDashboard do
         max_agents = Config.settings!().agent.max_concurrent_agents
         running_event_width = running_event_width(terminal_columns_override)
         running_rows = format_running_rows(running, running_event_width)
-        running_to_backoff_spacer = if(running == [], do: [], else: ["│"])
+        running_to_queue_spacer = if(running == [], do: [], else: ["│"])
+
+        pending_slot_section =
+          if pending_slot == [] do
+            []
+          else
+            [colorize("├─ Pending slots", @ansi_bold), "│"] ++ format_pending_slot_rows(pending_slot) ++ ["│"]
+          end
+
         backoff_rows = format_retry_rows(retrying)
 
         ([
@@ -374,7 +384,8 @@ defmodule SymphonyElixir.StatusDashboard do
            running_table_separator_row(running_event_width)
          ] ++
            running_rows ++
-           running_to_backoff_spacer ++
+           running_to_queue_spacer ++
+           pending_slot_section ++
            [colorize("├─ Backoff queue", @ansi_bold), "│"] ++
            backoff_rows ++
            [closing_border()])
@@ -602,6 +613,7 @@ defmodule SymphonyElixir.StatusDashboard do
           {:ok,
            %{
              running: running,
+             pending_slot: Map.get(snapshot, :pending_slot, []),
              retrying: retrying,
              codex_totals: codex_totals,
              rate_limits: Map.get(snapshot, :rate_limits),
@@ -698,6 +710,25 @@ defmodule SymphonyElixir.StatusDashboard do
       |> Enum.map_join(", ", &format_retry_summary/1)
       |> String.split(", ")
     end
+  end
+
+  defp format_pending_slot_rows(pending_slot) do
+    pending_slot
+    |> Enum.sort_by(fn entry -> {Map.get(entry, :priority) || 5, Map.get(entry, :identifier) || ""} end)
+    |> Enum.map(&format_pending_slot_summary/1)
+  end
+
+  defp format_pending_slot_summary(entry) do
+    identifier = Map.get(entry, :identifier) || Map.get(entry, :issue_id) || "unknown"
+    state = Map.get(entry, :state) || "unknown"
+    reason = Map.get(entry, :reason) || "agent slot"
+
+    "│  #{colorize("...", @ansi_orange)} " <>
+      colorize("#{identifier}", @ansi_cyan) <>
+      " " <>
+      colorize("#{state}", @ansi_yellow) <>
+      " " <>
+      colorize("waiting=#{truncate(reason, 80)}", @ansi_dim)
   end
 
   defp format_retry_summary(retry_entry) do

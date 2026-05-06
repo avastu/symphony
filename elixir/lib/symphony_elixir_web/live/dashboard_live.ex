@@ -121,6 +121,12 @@ defmodule SymphonyElixirWeb.DashboardLive do
           </article>
 
           <article class="metric-card">
+            <p class="metric-label">Pending slot</p>
+            <p class="metric-value numeric"><%= @payload.counts.pending_slot %></p>
+            <p class="metric-detail">Eligible issues waiting for agent capacity.</p>
+          </article>
+
+          <article class="metric-card">
             <p class="metric-label">Total tokens</p>
             <p class="metric-value numeric"><%= format_int(@payload.codex_totals.total_tokens) %></p>
             <p class="metric-detail numeric">
@@ -150,6 +156,60 @@ defmodule SymphonyElixirWeb.DashboardLive do
           <p :if={@payload.deploy_pending.blocker} class="attention-error">
             <%= @payload.deploy_pending.blocker %>
           </p>
+        </section>
+
+        <section class="section-card">
+          <div class="section-header">
+            <div>
+              <h2 class="section-title">Pending slot queue</h2>
+              <p class="section-copy">Eligible issues waiting for a global, state, or worker-host agent slot.</p>
+            </div>
+          </div>
+
+          <%= if @payload.pending_slot == [] do %>
+            <p class="empty-state">No issues are currently waiting on capacity.</p>
+          <% else %>
+            <div class="table-wrap">
+              <table class="data-table" style="min-width: 760px;">
+                <thead>
+                  <tr>
+                    <th>Issue</th>
+                    <th>State</th>
+                    <th>Project</th>
+                    <th>Priority</th>
+                    <th>Waiting for</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr :for={entry <- @payload.pending_slot}>
+                    <td>
+                      <div class="issue-stack">
+                        <span class="issue-id"><%= entry.issue_identifier %></span>
+                        <span :if={entry.title} class="muted"><%= entry.title %></span>
+                        <a
+                          :if={entry.url}
+                          class="issue-link"
+                          href={entry.url}
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          Linear issue
+                        </a>
+                      </div>
+                    </td>
+                    <td>
+                      <span class={state_badge_class(entry.state)}>
+                        <%= entry.state %>
+                      </span>
+                    </td>
+                    <td><%= entry.project || "n/a" %></td>
+                    <td class="numeric"><%= entry.priority || "n/a" %></td>
+                    <td><%= entry.reason || "agent slot" %></td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          <% end %>
         </section>
 
         <section class="section-card">

@@ -15,9 +15,11 @@ defmodule SymphonyElixirWeb.Presenter do
           generated_at: generated_at,
           counts: %{
             running: length(snapshot.running),
+            pending_slot: length(Map.get(snapshot, :pending_slot, [])),
             retrying: length(snapshot.retrying)
           },
           running: Enum.map(snapshot.running, &running_entry_payload/1),
+          pending_slot: Enum.map(Map.get(snapshot, :pending_slot, []), &pending_slot_entry_payload/1),
           retrying: Enum.map(snapshot.retrying, &retry_entry_payload/1),
           managed_projects: managed_project_payloads(),
           codex_totals: snapshot.codex_totals,
@@ -138,6 +140,19 @@ defmodule SymphonyElixirWeb.Presenter do
       error: entry.error,
       worker_host: Map.get(entry, :worker_host),
       workspace_path: Map.get(entry, :workspace_path)
+    }
+  end
+
+  defp pending_slot_entry_payload(entry) do
+    %{
+      issue_id: entry.issue_id,
+      issue_identifier: entry.identifier,
+      title: entry.title,
+      state: entry.state,
+      priority: Map.get(entry, :priority),
+      project: Map.get(entry, :project_label),
+      url: Map.get(entry, :url),
+      reason: Map.get(entry, :reason)
     }
   end
 

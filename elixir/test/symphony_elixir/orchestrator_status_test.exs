@@ -765,6 +765,47 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert due_in_ms > 0
   end
 
+  test "orchestrator snapshot includes issues waiting for capacity" do
+    orchestrator_name = Module.concat(__MODULE__, :PendingSlotOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    pending_entry = %{
+      issue_id: "issue-pending-slot",
+      identifier: "MT-501",
+      title: "Wait for an agent slot",
+      state: "In Progress",
+      priority: 2,
+      url: "https://example.org/issues/MT-501",
+      project_label: "Symphony (symphony)",
+      reason: "global agent limit reached"
+    }
+
+    :sys.replace_state(pid, fn state ->
+      %{state | pending_slot_issues: [pending_entry]}
+    end)
+
+    snapshot = GenServer.call(pid, :snapshot)
+
+    assert [
+             %{
+               issue_id: "issue-pending-slot",
+               identifier: "MT-501",
+               title: "Wait for an agent slot",
+               state: "In Progress",
+               priority: 2,
+               url: "https://example.org/issues/MT-501",
+               project_label: "Symphony (symphony)",
+               reason: "global agent limit reached"
+             }
+           ] = snapshot.pending_slot
+  end
+
   test "orchestrator snapshot includes poll countdown and checking status" do
     orchestrator_name = Module.concat(__MODULE__, :PollingSnapshotOrchestrator)
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)

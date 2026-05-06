@@ -36,6 +36,7 @@ defmodule SymphonyElixir.Orchestrator do
       running: %{},
       completed: MapSet.new(),
       claimed: MapSet.new(),
+      pending_slot_issues: [],
       retry_attempts: %{},
       review_checkpoints: %{},
       codex_totals: nil,
@@ -213,6 +214,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp maybe_dispatch(%State{} = state) do
     state = reconcile_running_issues(state)
+    state = %{state | pending_slot_issues: []}
 
     intent = DeployIntent.load()
 
@@ -419,11 +421,14 @@ defmodule SymphonyElixir.Orchestrator do
   defp summarize_command_output(output), do: inspect(output, limit: 20)
 
   defp maybe_choose_issues(%State{} = state, issues) do
-    if available_slots(state) > 0 do
-      choose_issues(issues, state)
-    else
-      state
-    end
+    chosen_state =
+      if available_slots(state) > 0 do
+        choose_issues(issues, state)
+      else
+        state
+      end
+
+    %{chosen_state | pending_slot_issues: pending_slot_issues(issues, chosen_state)}
   end
 
   defp fetch_review_issues do
@@ -733,6 +738,66 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp issue_created_at_sort_key(%Issue{}), do: 9_223_372_036_854_775_807
   defp issue_created_at_sort_key(_issue), do: 9_223_372_036_854_775_807
+
+  defp pending_slot_issues(issues, %State{} = state) when is_list(issues) do
+    active_states = active_state_set()
+    terminal_states = terminal_state_set()
+
+    issues
+    |> sort_issues_for_dispatch()
+    |> Enum.filter(fn
+      %Issue{} = issue ->
+        pending_slot_candidate?(issue, state, active_states, terminal_states)
+
+      _ ->
+        false
+    end)
+    |> Enum.map(&pending_slot_entry(&1, state))
+  end
+
+  defp pending_slot_issues(_issues, _state), do: []
+
+  defp pending_slot_candidate?(
+         %Issue{} = issue,
+         %State{running: running, claimed: claimed} = state,
+         active_states,
+         terminal_states
+       ) do
+    candidate_issue?(issue, active_states, terminal_states) and
+      !issue_blocked?(issue, terminal_states) and
+      !MapSet.member?(claimed, issue.id) and
+      !Map.has_key?(running, issue.id) and
+      !is_nil(slot_wait_reason(issue, state))
+  end
+
+  defp pending_slot_entry(%Issue{} = issue, %State{} = state) do
+    %{
+      issue_id: issue.id,
+      identifier: issue.identifier,
+      title: issue.title,
+      state: issue.state,
+      priority: issue.priority,
+      url: issue.url,
+      project_label: Issue.project_label(issue),
+      reason: slot_wait_reason(issue, state)
+    }
+  end
+
+  defp slot_wait_reason(%Issue{} = issue, %State{} = state) do
+    cond do
+      available_slots(state) <= 0 ->
+        "global agent limit reached"
+
+      !state_slots_available?(issue, state.running) ->
+        "#{issue.state || "state"} agent limit reached"
+
+      !worker_slots_available?(state) ->
+        "worker host limit reached"
+
+      true ->
+        nil
+    end
+  end
 
   defp should_dispatch_issue?(
          %Issue{} = issue,
@@ -1380,9 +1445,24 @@ defmodule SymphonyElixir.Orchestrator do
         }
       end)
 
+    pending_slot =
+      Enum.map(state.pending_slot_issues, fn entry ->
+        %{
+          issue_id: Map.get(entry, :issue_id),
+          identifier: Map.get(entry, :identifier),
+          title: Map.get(entry, :title),
+          state: Map.get(entry, :state),
+          priority: Map.get(entry, :priority),
+          url: Map.get(entry, :url),
+          project_label: Map.get(entry, :project_label),
+          reason: Map.get(entry, :reason)
+        }
+      end)
+
     {:reply,
      %{
        running: running,
+       pending_slot: pending_slot,
        retrying: retrying,
        codex_totals: state.codex_totals,
        rate_limits: Map.get(state, :codex_rate_limits),

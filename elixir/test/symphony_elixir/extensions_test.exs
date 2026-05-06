@@ -361,7 +361,7 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     assert state_payload == %{
              "generated_at" => state_payload["generated_at"],
-             "counts" => %{"running" => 1, "retrying" => 1},
+             "counts" => %{"running" => 1, "pending_slot" => 1, "retrying" => 1},
              "running" => [
                %{
                  "issue_id" => "issue-http",
@@ -377,6 +377,18 @@ defmodule SymphonyElixir.ExtensionsTest do
                  "started_at" => state_payload["running"] |> List.first() |> Map.fetch!("started_at"),
                  "last_event_at" => nil,
                  "tokens" => %{"input_tokens" => 4, "output_tokens" => 8, "total_tokens" => 12}
+               }
+             ],
+             "pending_slot" => [
+               %{
+                 "issue_id" => "issue-pending-slot",
+                 "issue_identifier" => "MT-PENDING",
+                 "title" => "Wait for an open slot",
+                 "state" => "In Progress",
+                 "priority" => 2,
+                 "project" => "Symphony (symphony)",
+                 "url" => "https://example.org/issues/MT-PENDING",
+                 "reason" => "global agent limit reached"
                }
              ],
              "retrying" => [
@@ -803,7 +815,7 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     response = Req.get!("http://127.0.0.1:#{port}/api/v1/state")
     assert response.status == 200
-    assert response.body["counts"] == %{"running" => 1, "retrying" => 1}
+    assert response.body["counts"] == %{"running" => 1, "pending_slot" => 1, "retrying" => 1}
 
     dashboard_css = Req.get!("http://127.0.0.1:#{port}/dashboard.css")
     assert dashboard_css.status == 200
@@ -863,6 +875,18 @@ defmodule SymphonyElixir.ExtensionsTest do
           codex_output_tokens: 8,
           codex_total_tokens: 12,
           started_at: DateTime.utc_now()
+        }
+      ],
+      pending_slot: [
+        %{
+          issue_id: "issue-pending-slot",
+          identifier: "MT-PENDING",
+          title: "Wait for an open slot",
+          state: "In Progress",
+          priority: 2,
+          project_label: "Symphony (symphony)",
+          url: "https://example.org/issues/MT-PENDING",
+          reason: "global agent limit reached"
         }
       ],
       retrying: [
