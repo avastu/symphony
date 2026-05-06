@@ -367,8 +367,44 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert issue.state == "Todo"
     assert issue.workpad_state == "blocked"
     assert issue.workpad_phase == "agent_review"
+    assert issue.review_action == nil
     assert issue.assignee_id == "user-1"
     assert issue.assigned_to_worker
+  end
+
+  test "linear client extracts actionable review commands from non-workpad comments" do
+    raw_issue = %{
+      "id" => "issue-100",
+      "identifier" => "MT-100",
+      "title" => "Ready for review",
+      "state" => %{"name" => "Human Review"},
+      "comments" => %{
+        "nodes" => [
+          %{
+            "body" => "## Codex Workpad\n\nState: ready_for_review\nPhase: final_review\n",
+            "createdAt" => "2026-05-06T22:00:00Z",
+            "updatedAt" => "2026-05-06T22:00:00Z"
+          },
+          %{
+            "body" => "UTS-128 is back to high-risk human review after addressing feedback.",
+            "createdAt" => "2026-05-06T23:18:37Z",
+            "updatedAt" => "2026-05-06T23:18:37Z"
+          },
+          %{
+            "body" => "Revise plan: tighten the replay protection test.",
+            "createdAt" => "2026-05-06T23:20:00Z",
+            "updatedAt" => "2026-05-06T23:20:00Z"
+          }
+        ]
+      },
+      "createdAt" => "2026-05-06T20:00:00Z",
+      "updatedAt" => "2026-05-06T23:20:00Z"
+    }
+
+    issue = Client.normalize_issue_for_test(raw_issue)
+
+    assert issue.workpad_state == "ready_for_review"
+    assert issue.review_action == "rework:1778109600000000"
   end
 
   test "linear client marks explicitly unassigned issues as not routed to worker" do

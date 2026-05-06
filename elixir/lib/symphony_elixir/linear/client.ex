@@ -530,6 +530,7 @@ defmodule SymphonyElixir.Linear.Client do
       assignee_id: assignee_field(assignee, "id"),
       workpad_state: latest_workpad_field(issue, "State"),
       workpad_phase: latest_workpad_field(issue, "Phase"),
+      review_action: latest_review_action(issue),
       blocked_by: extract_blockers(issue),
       labels: extract_labels(issue),
       assigned_to_worker: assigned_to_worker?(assignee, assignee_filter),
@@ -701,6 +702,45 @@ defmodule SymphonyElixir.Linear.Client do
   end
 
   defp latest_workpad_body(_issue), do: nil
+
+  defp latest_review_action(%{"comments" => %{"nodes" => comments}}) when is_list(comments) do
+    comments
+    |> Enum.reject(&workpad_comment?/1)
+    |> Enum.sort_by(&comment_updated_at_sort_key/1, :desc)
+    |> Enum.find_value(&review_action_marker/1)
+  end
+
+  defp latest_review_action(_issue), do: nil
+
+  defp workpad_comment?(comment) when is_map(comment) do
+    comment
+    |> Map.get("body", "")
+    |> to_string()
+    |> String.trim_leading()
+    |> String.starts_with?("## Codex Workpad")
+  end
+
+  defp review_action_marker(%{"body" => body} = comment) when is_binary(body) do
+    case review_action_kind(body) do
+      nil -> nil
+      kind -> "#{kind}:#{comment_updated_at_sort_key(comment)}"
+    end
+  end
+
+  defp review_action_marker(_comment), do: nil
+
+  defp review_action_kind(body) when is_binary(body) do
+    normalized = String.trim_leading(body)
+
+    cond do
+      Regex.match?(~r/\ARevise plan:\s+\S/m, normalized) -> "rework"
+      Regex.match?(~r/\AApproved with change:\s+\S/m, normalized) -> "rework"
+      Regex.match?(~r/\AAnswer:\s+\S/m, normalized) -> "rework"
+      Regex.match?(~r/\ARetry\.?\s*\z/m, normalized) -> "rework"
+      Regex.match?(~r/\A(Requested changes|Changes requested):\s+\S/im, normalized) -> "rework"
+      true -> nil
+    end
+  end
 
   defp workpad_field(body, field_name) when is_binary(body) and is_binary(field_name) do
     field_pattern = ~r/^\s*#{Regex.escape(field_name)}:\s*(.*?)\s*$/m

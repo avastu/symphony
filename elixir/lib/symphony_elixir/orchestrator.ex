@@ -878,6 +878,12 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp workpad_publish_blocked?(_issue), do: false
 
+  defp workpad_ready_for_review?(%Issue{workpad_state: workpad_state}) when is_binary(workpad_state) do
+    normalize_issue_state(workpad_state) == "ready_for_review"
+  end
+
+  defp workpad_ready_for_review?(_issue), do: false
+
   defp blocked_by_non_terminal?(blockers, terminal_states) when is_list(blockers) do
     Enum.any?(blockers, fn
       %{state: blocker_state} when is_binary(blocker_state) ->
@@ -1708,6 +1714,7 @@ defmodule SymphonyElixir.Orchestrator do
     checkpoint = review_checkpoint(issue)
     previous_checkpoint = Map.get(state.review_checkpoints, issue_id)
     changed? = review_checkpoint_changed?(previous_checkpoint, checkpoint)
+    actionable_review? = review_action_changed?(previous_checkpoint, checkpoint)
 
     state = %{state | review_checkpoints: Map.put(state.review_checkpoints, issue_id, checkpoint)}
     terminal_states = terminal_state_set()
@@ -1740,7 +1747,7 @@ defmodule SymphonyElixir.Orchestrator do
         }
 
       human_review_state?(issue.state) ->
-        handle_human_review_check_issue(state, issue, changed?)
+        handle_human_review_check_issue(state, issue, changed?, actionable_review?)
 
       true ->
         {
@@ -1757,8 +1764,11 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp handle_human_review_check_issue(%State{} = state, %Issue{id: issue_id} = issue, changed?) do
+  defp handle_human_review_check_issue(%State{} = state, %Issue{id: issue_id} = issue, changed?, actionable_review?) do
     cond do
+      actionable_review? ->
+        transition_review_issue_to_rework(state, issue)
+
       workpad_publish_blocked?(issue) ->
         {
           %{
@@ -1781,6 +1791,19 @@ defmodule SymphonyElixir.Orchestrator do
             issue_identifier: issue.identifier,
             reason: "blocked_review_boundary",
             operations: ["review_check", "workpad_state:blocked"]
+          },
+          release_issue_claim(state, issue_id)
+        }
+
+      workpad_ready_for_review?(issue) ->
+        {
+          %{
+            queued: false,
+            coalesced: false,
+            issue_id: issue_id,
+            issue_identifier: issue.identifier,
+            reason: "ready_review_boundary",
+            operations: ["review_check", "workpad_state:ready_for_review"]
           },
           release_issue_claim(state, issue_id)
         }
@@ -1871,6 +1894,7 @@ defmodule SymphonyElixir.Orchestrator do
     %{
       state: issue.state,
       workpad_state: issue.workpad_state,
+      review_action: issue.review_action,
       updated_at: issue.updated_at,
       branch_name: issue.branch_name,
       url: issue.url
@@ -1887,6 +1911,19 @@ defmodule SymphonyElixir.Orchestrator do
     human_review_state?(previous_state) and human_review_state?(current_state) and
       Map.drop(previous_checkpoint, [:state]) != Map.drop(checkpoint, [:state])
   end
+
+  defp review_action_changed?(previous_checkpoint, checkpoint)
+       when is_map(previous_checkpoint) and is_map(checkpoint) do
+    previous_state = Map.get(previous_checkpoint, :state)
+    current_state = Map.get(checkpoint, :state)
+    previous_action = Map.get(previous_checkpoint, :review_action)
+    current_action = Map.get(checkpoint, :review_action)
+
+    human_review_state?(previous_state) and human_review_state?(current_state) and
+      is_binary(current_action) and current_action != previous_action
+  end
+
+  defp review_action_changed?(_previous_checkpoint, _checkpoint), do: false
 
   defp human_review_state?(state_name) when is_binary(state_name) do
     normalize_issue_state(state_name) in ["human review", "in review"]
