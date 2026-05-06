@@ -92,6 +92,13 @@ Minimal example:
 tracker:
   kind: linear
   project_slug: "..."
+  # Optional multi-project mode. The runtime reads managed_projects first,
+  # then project_slugs, then falls back to project_slug.
+  managed_projects:
+    - name: "Beta Launch Validation"
+      slug: "..."
+    - name: "Iris Personal Agent Stack"
+      slug: "..."
 workspace:
   root: ~/code/workspaces
 hooks:
@@ -112,6 +119,8 @@ Title: {{ issue.title }} Body: {{ issue.description }}
 Notes:
 
 - If a value is missing, defaults are used.
+- Linear polling is scoped to the configured project set only. Adding
+  `managed_projects` or `project_slugs` does not change per-issue repository routing.
 - Safer Codex defaults are used when policy fields are omitted:
   - `codex.approval_policy` defaults to `{"reject":{"sandbox_approval":true,"rules":true,"mcp_elicitations":true}}`
   - `codex.thread_sandbox` defaults to `workspace-write`

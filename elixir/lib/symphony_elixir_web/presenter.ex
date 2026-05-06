@@ -19,6 +19,7 @@ defmodule SymphonyElixirWeb.Presenter do
           },
           running: Enum.map(snapshot.running, &running_entry_payload/1),
           retrying: Enum.map(snapshot.retrying, &retry_entry_payload/1),
+          managed_projects: managed_project_payloads(),
           codex_totals: snapshot.codex_totals,
           rate_limits: snapshot.rate_limits
         }
@@ -109,6 +110,7 @@ defmodule SymphonyElixirWeb.Presenter do
       issue_id: entry.issue_id,
       issue_identifier: entry.identifier,
       state: entry.state,
+      project: Map.get(entry, :project_label),
       worker_host: Map.get(entry, :worker_host),
       workspace_path: Map.get(entry, :workspace_path),
       session_id: entry.session_id,
@@ -130,6 +132,7 @@ defmodule SymphonyElixirWeb.Presenter do
       issue_id: entry.issue_id,
       issue_identifier: entry.identifier,
       attempt: entry.attempt,
+      project: Map.get(entry, :project_label),
       due_at: due_at_iso8601(entry.due_in_ms),
       error: entry.error,
       worker_host: Map.get(entry, :worker_host),
@@ -144,6 +147,7 @@ defmodule SymphonyElixirWeb.Presenter do
       session_id: running.session_id,
       turn_count: Map.get(running, :turn_count, 0),
       state: running.state,
+      project: Map.get(running, :project_label),
       started_at: iso8601(running.started_at),
       last_event: running.last_codex_event,
       last_message: summarize_message(running.last_codex_message),
@@ -159,6 +163,7 @@ defmodule SymphonyElixirWeb.Presenter do
   defp retry_issue_payload(retry) do
     %{
       attempt: retry.attempt,
+      project: Map.get(retry, :project_label),
       due_at: due_at_iso8601(retry.due_in_ms),
       error: retry.error,
       worker_host: Map.get(retry, :worker_host),
@@ -174,6 +179,17 @@ defmodule SymphonyElixirWeb.Presenter do
 
   defp workspace_host(running, retry) do
     (running && Map.get(running, :worker_host)) || (retry && Map.get(retry, :worker_host))
+  end
+
+  defp managed_project_payloads do
+    Config.tracker_projects()
+    |> Enum.map(fn project ->
+      %{
+        name: project.name,
+        slug: project.slug,
+        source: project.source
+      }
+    end)
   end
 
   defp recent_events_payload(running) do
