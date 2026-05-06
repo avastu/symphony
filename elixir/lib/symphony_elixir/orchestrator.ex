@@ -5,9 +5,9 @@ defmodule SymphonyElixir.Orchestrator do
 
   use GenServer
   require Logger
-  import Bitwise, only: [<<<: 2]
+  import Bitwise, only: [<<<: 2, &&&: 2]
 
-  alias SymphonyElixir.{AgentRunner, Config, StatusDashboard, Tracker, Workspace}
+  alias SymphonyElixir.{AgentRunner, Config, DeployIntent, StatusDashboard, Tracker, Workspace}
   alias SymphonyElixir.Linear.Issue
 
   @continuation_retry_delay_ms 1_000
@@ -41,6 +41,8 @@ defmodule SymphonyElixir.Orchestrator do
       codex_totals: nil,
       codex_rate_limits: nil
     ]
+
+    @type t :: %__MODULE__{}
   end
 
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -182,8 +184,11 @@ defmodule SymphonyElixir.Orchestrator do
   def handle_info({:retry_issue, issue_id, retry_token}, state) do
     result =
       case pop_retry_attempt_state(state, issue_id, retry_token) do
-        {:ok, attempt, metadata, state} -> handle_retry_issue(state, issue_id, attempt, metadata)
-        :missing -> {:noreply, state}
+        {:ok, attempt, metadata, state} ->
+          handle_retry_attempt_after_pop(state, issue_id, attempt, metadata)
+
+        :missing ->
+          {:noreply, state}
       end
 
     notify_dashboard()
@@ -197,55 +202,221 @@ defmodule SymphonyElixir.Orchestrator do
     {:noreply, state}
   end
 
+  defp handle_retry_attempt_after_pop(%State{} = state, issue_id, attempt, metadata) do
+    if DeployIntent.active?(DeployIntent.load()) do
+      Logger.info("Deploy pending paused retry timer for issue_id=#{issue_id}; dispatch remains closed")
+      {:noreply, release_issue_claim(state, issue_id)}
+    else
+      handle_retry_issue(state, issue_id, attempt, metadata)
+    end
+  end
+
   defp maybe_dispatch(%State{} = state) do
     state = reconcile_running_issues(state)
 
-    with :ok <- Config.validate!(),
-         {:ok, issues} <- Tracker.fetch_candidate_issues(),
-         {:ok, review_issues} <- fetch_review_issues() do
-      state
-      |> maybe_choose_issues(issues)
-      |> check_review_issues(review_issues)
+    intent = DeployIntent.load()
+
+    if DeployIntent.active?(intent) do
+      handle_deploy_intent(state, intent)
     else
-      {:error, :missing_linear_api_token} ->
-        Logger.error("Linear API token missing in WORKFLOW.md")
+      with :ok <- Config.validate!(),
+           {:ok, issues} <- Tracker.fetch_candidate_issues(),
+           {:ok, review_issues} <- fetch_review_issues() do
+        state
+        |> maybe_choose_issues(issues)
+        |> check_review_issues(review_issues)
+      else
+        {:error, :missing_linear_api_token} ->
+          Logger.error("Linear API token missing in WORKFLOW.md")
+          state
+
+        {:error, :missing_linear_project_slug} ->
+          Logger.error("Linear project slug missing in WORKFLOW.md")
+          state
+
+        {:error, :missing_tracker_kind} ->
+          Logger.error("Tracker kind missing in WORKFLOW.md")
+
+          state
+
+        {:error, {:unsupported_tracker_kind, kind}} ->
+          Logger.error("Unsupported tracker kind in WORKFLOW.md: #{inspect(kind)}")
+
+          state
+
+        {:error, {:invalid_workflow_config, message}} ->
+          Logger.error("Invalid WORKFLOW.md config: #{message}")
+          state
+
+        {:error, {:missing_workflow_file, path, reason}} ->
+          Logger.error("Missing WORKFLOW.md at #{path}: #{inspect(reason)}")
+          state
+
+        {:error, :workflow_front_matter_not_a_map} ->
+          Logger.error("Failed to parse WORKFLOW.md: workflow front matter must decode to a map")
+          state
+
+        {:error, {:workflow_parse_error, reason}} ->
+          Logger.error("Failed to parse WORKFLOW.md: #{inspect(reason)}")
+          state
+
+        {:error, reason} ->
+          Logger.error("Failed to fetch from Linear: #{inspect(reason)}")
+          state
+      end
+    end
+  end
+
+  defp handle_deploy_intent(%State{} = state, intent) when is_map(intent) do
+    {state, paused_retry_count} = pause_retry_queue_for_deploy(state, intent)
+    running_count = map_size(state.running)
+    retrying_count = map_size(state.retry_attempts)
+
+    case deploy_intent_step(intent, paused_retry_count, running_count, retrying_count) do
+      :paused_retries ->
+        write_deploy_draining(intent, running_count, retrying_count, :paused_retries, paused_retry_count)
         state
 
-      {:error, :missing_linear_project_slug} ->
-        Logger.error("Linear project configuration missing in WORKFLOW.md")
+      :failed ->
+        Logger.warning("Deploy pending remains failed; dispatch is closed: #{DeployIntent.summary(intent)}")
         state
 
-      {:error, :missing_tracker_kind} ->
-        Logger.error("Tracker kind missing in WORKFLOW.md")
-
+      :deploying ->
+        Logger.info("Deploy pending is already deploying; dispatch remains closed: #{DeployIntent.summary(intent)}")
         state
 
-      {:error, {:unsupported_tracker_kind, kind}} ->
-        Logger.error("Unsupported tracker kind in WORKFLOW.md: #{inspect(kind)}")
+      :deploy ->
+        start_deploy_intent(state, intent)
 
-        state
-
-      {:error, {:invalid_workflow_config, message}} ->
-        Logger.error("Invalid WORKFLOW.md config: #{message}")
-        state
-
-      {:error, {:missing_workflow_file, path, reason}} ->
-        Logger.error("Missing WORKFLOW.md at #{path}: #{inspect(reason)}")
-        state
-
-      {:error, :workflow_front_matter_not_a_map} ->
-        Logger.error("Failed to parse WORKFLOW.md: workflow front matter must decode to a map")
-        state
-
-      {:error, {:workflow_parse_error, reason}} ->
-        Logger.error("Failed to parse WORKFLOW.md: #{inspect(reason)}")
-        state
-
-      {:error, reason} ->
-        Logger.error("Failed to fetch from Linear: #{inspect(reason)}")
+      :draining ->
+        write_deploy_draining(intent, running_count, retrying_count, :draining, paused_retry_count)
         state
     end
   end
+
+  defp handle_deploy_intent(state, _intent), do: state
+
+  defp deploy_intent_step(intent, paused_retry_count, running_count, retrying_count) do
+    cond do
+      paused_retry_count > 0 -> :paused_retries
+      DeployIntent.failed?(intent) -> :failed
+      DeployIntent.deploying?(intent) -> :deploying
+      running_count == 0 and retrying_count == 0 -> :deploy
+      true -> :draining
+    end
+  end
+
+  defp write_deploy_draining(intent, running_count, retrying_count, reason, paused_retry_count) do
+    case DeployIntent.write_draining(intent, running_count, retrying_count) do
+      :ok -> log_deploy_draining(reason, running_count, retrying_count, paused_retry_count)
+      {:error, write_reason} -> Logger.error("Failed to update deploy-pending drain counts: #{inspect(write_reason)}")
+    end
+  end
+
+  defp log_deploy_draining(:paused_retries, _running_count, _retrying_count, paused_retry_count) do
+    Logger.info("Deploy pending paused #{paused_retry_count} retrying issue(s); redeploy will be checked on the next poll")
+  end
+
+  defp log_deploy_draining(:draining, running_count, retrying_count, _paused_retry_count) do
+    Logger.info("Deploy pending is draining; dispatch is closed: #{running_count} running / #{retrying_count} retrying")
+  end
+
+  @doc false
+  @spec poll_once_for_test(State.t()) :: State.t()
+  def poll_once_for_test(%State{} = state), do: maybe_dispatch(state)
+
+  @doc false
+  @spec handle_deploy_intent_for_test(State.t(), map()) :: State.t()
+  def handle_deploy_intent_for_test(%State{} = state, intent) when is_map(intent) do
+    handle_deploy_intent(state, intent)
+  end
+
+  defp pause_retry_queue_for_deploy(%State{retry_attempts: retry_attempts} = state, intent)
+       when map_size(retry_attempts) == 0 do
+    _ = intent
+    {state, 0}
+  end
+
+  defp pause_retry_queue_for_deploy(%State{} = state, intent) do
+    retry_issue_ids = Map.keys(state.retry_attempts)
+
+    Enum.each(state.retry_attempts, fn
+      {_issue_id, %{timer_ref: timer_ref}} when is_reference(timer_ref) ->
+        Process.cancel_timer(timer_ref)
+
+      _entry ->
+        :ok
+    end)
+
+    Logger.info("Deploy pending paused #{length(retry_issue_ids)} retrying issue(s); they will be rediscovered after deploy resumes. #{DeployIntent.summary(intent)}")
+
+    {
+      %{
+        state
+        | retry_attempts: %{},
+          claimed: MapSet.difference(state.claimed, MapSet.new(retry_issue_ids))
+      },
+      length(retry_issue_ids)
+    }
+  end
+
+  defp start_deploy_intent(%State{} = state, intent) do
+    with :ok <- DeployIntent.write_deploying(intent),
+         {:ok, command} <- DeployIntent.target_command(intent),
+         :ok <- run_deploy_command(command, DeployIntent.path()) do
+      Logger.info("Deploy pending reached zero running/retrying; started #{command} without --allow-active")
+      notify_dashboard()
+      state
+    else
+      {:error, reason} ->
+        blocker = format_deploy_blocker(reason)
+        _ = DeployIntent.write_failed(DeployIntent.load() || intent, blocker)
+        Logger.error("Failed to start deploy-pending redeploy: #{blocker}")
+        state
+    end
+  end
+
+  defp run_deploy_command(command, intent_file) do
+    runner = Application.get_env(:symphony_elixir, :deploy_command_runner, &default_deploy_command_runner/2)
+    runner.(command, intent_file)
+  end
+
+  defp default_deploy_command_runner(command, intent_file) do
+    if executable_file?(command) do
+      log_file = Path.join(Path.dirname(intent_file), "deploy-intent-runner.log")
+
+      case System.cmd(
+             "sh",
+             ["-c", "nohup \"$1\" --intent-file \"$2\" >> \"$3\" 2>&1 &", "deploy-intent", command, intent_file, log_file],
+             stderr_to_stdout: true
+           ) do
+        {_output, 0} -> :ok
+        {output, status} -> {:error, "redeploy command launcher exited #{status}: #{summarize_command_output(output)}"}
+      end
+    else
+      {:error, "redeploy command is not executable: #{command}"}
+    end
+  rescue
+    error -> {:error, Exception.message(error)}
+  end
+
+  defp executable_file?(path) do
+    case File.stat(path) do
+      {:ok, %{type: :regular, mode: mode}} -> (mode &&& 0o111) != 0
+      _ -> false
+    end
+  end
+
+  defp format_deploy_blocker(reason) when is_binary(reason), do: reason
+  defp format_deploy_blocker(reason), do: inspect(reason)
+
+  defp summarize_command_output(output) when is_binary(output) do
+    output
+    |> String.trim()
+    |> String.slice(0, 500)
+  end
+
+  defp summarize_command_output(output), do: inspect(output, limit: 20)
 
   defp maybe_choose_issues(%State{} = state, issues) do
     if available_slots(state) > 0 do
@@ -460,6 +631,10 @@ defmodule SymphonyElixir.Orchestrator do
         state
 
       map_size(state.running) == 0 ->
+        state
+
+      DeployIntent.active?(DeployIntent.load()) ->
+        Logger.info("Deploy pending is active; skipping stalled-worker restarts while running work drains")
         state
 
       true ->
@@ -1204,6 +1379,7 @@ defmodule SymphonyElixir.Orchestrator do
        retrying: retrying,
        codex_totals: state.codex_totals,
        rate_limits: Map.get(state, :codex_rate_limits),
+       deploy_pending: DeployIntent.public_payload(DeployIntent.load()),
        polling: %{
          checking?: state.poll_check_in_progress == true,
          next_poll_in_ms: next_poll_in_ms(state.next_poll_due_at_ms, now_ms),
@@ -1229,17 +1405,32 @@ defmodule SymphonyElixir.Orchestrator do
 
   def handle_call({:request_review_check, issue_id}, _from, state) when is_binary(issue_id) do
     state = refresh_runtime_config(state)
+    intent = DeployIntent.load()
 
     {payload, state} =
-      case Tracker.fetch_issue_states_by_ids([issue_id]) do
-        {:ok, [%Issue{} = issue | _]} ->
-          handle_review_check_issue(state, issue)
+      if DeployIntent.active?(intent) do
+        {
+          %{
+            queued: false,
+            coalesced: false,
+            issue_id: issue_id,
+            reason: "deploy_pending",
+            operations: ["review_check"],
+            deploy_pending: DeployIntent.public_payload(intent)
+          },
+          release_issue_claim(state, issue_id)
+        }
+      else
+        case Tracker.fetch_issue_states_by_ids([issue_id]) do
+          {:ok, [%Issue{} = issue | _]} ->
+            handle_review_check_issue(state, issue)
 
-        {:ok, []} ->
-          {%{queued: false, coalesced: false, issue_id: issue_id, reason: "issue_not_found", operations: ["review_check"]}, state}
+          {:ok, []} ->
+            {%{queued: false, coalesced: false, issue_id: issue_id, reason: "issue_not_found", operations: ["review_check"]}, state}
 
-        {:error, reason} ->
-          {%{queued: false, coalesced: false, issue_id: issue_id, reason: inspect(reason), operations: ["review_check"]}, state}
+          {:error, reason} ->
+            {%{queued: false, coalesced: false, issue_id: issue_id, reason: inspect(reason), operations: ["review_check"]}, state}
+        end
       end
 
     {:reply, Map.put(payload, :requested_at, DateTime.utc_now()), state}

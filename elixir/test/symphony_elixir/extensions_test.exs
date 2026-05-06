@@ -328,7 +328,18 @@ defmodule SymphonyElixir.ExtensionsTest do
       ]
     )
 
-    snapshot = static_snapshot()
+    snapshot =
+      static_snapshot()
+      |> Map.put(:deploy_pending, %{
+        active: true,
+        target: "control",
+        status: "draining",
+        running_count: 1,
+        retrying_count: 1,
+        blocker: nil,
+        summary: "Deploy pending: draining 1 running / 1 retrying target=control"
+      })
+
     orchestrator_name = Module.concat(__MODULE__, :ObservabilityApiOrchestrator)
 
     {:ok, _pid} =
@@ -390,7 +401,16 @@ defmodule SymphonyElixir.ExtensionsTest do
                "total_tokens" => 12,
                "seconds_running" => 42.5
              },
-             "rate_limits" => %{"primary" => %{"remaining" => 11}}
+             "rate_limits" => %{"primary" => %{"remaining" => 11}},
+             "deploy_pending" => %{
+               "active" => true,
+               "target" => "control",
+               "status" => "draining",
+               "running_count" => 1,
+               "retrying_count" => 1,
+               "blocker" => nil,
+               "summary" => "Deploy pending: draining 1 running / 1 retrying target=control"
+             }
            }
 
     conn = get(build_conn(), "/api/v1/MT-HTTP")

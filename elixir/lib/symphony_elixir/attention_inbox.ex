@@ -16,8 +16,6 @@ defmodule SymphonyElixir.AttentionInbox do
     "fyi" => {50, "P5 FYI", "Informational."}
   }
   @default_refresh_ms 60_000
-  @default_command "/Users/utsav/dev/symphony-control/scripts/attention-inbox"
-  @default_reply_command "/Users/utsav/dev/symphony-control/scripts/attention-reply"
   @url_pattern ~r/https?:\/\/[^\s<>"')\]]+/
   @trailing_url_punctuation ~r/[.,;:!?]+$/
 
@@ -82,7 +80,7 @@ defmodule SymphonyElixir.AttentionInbox do
 
   @spec default_fetch() :: {:ok, String.t()} | {:error, term()}
   def default_fetch do
-    command = System.get_env("SYMPHONY_ATTENTION_INBOX_COMMAND") || @default_command
+    command = System.get_env("SYMPHONY_ATTENTION_INBOX_COMMAND") || default_control_script("attention-inbox")
 
     case System.cmd(command, ["--json"], stderr_to_stdout: true) do
       {output, 0} -> {:ok, output}
@@ -95,7 +93,7 @@ defmodule SymphonyElixir.AttentionInbox do
   @spec default_reply(String.t(), String.t()) :: :ok | {:error, term()}
   def default_reply(issue_identifier, body)
       when is_binary(issue_identifier) and is_binary(body) do
-    command = System.get_env("SYMPHONY_ATTENTION_REPLY_COMMAND") || @default_reply_command
+    command = System.get_env("SYMPHONY_ATTENTION_REPLY_COMMAND") || default_control_script("attention-reply")
 
     case System.cmd(command, ["--issue", issue_identifier, "--body", body, "--post"], stderr_to_stdout: true) do
       {_output, 0} -> :ok
@@ -551,4 +549,20 @@ defmodule SymphonyElixir.AttentionInbox do
   end
 
   defp summarize_output(output), do: inspect(output, limit: 20)
+
+  defp default_control_script(script_name) do
+    control_dir =
+      [
+        System.get_env("SYMPHONY_CONTROL_DIR"),
+        Path.expand("../../symphony-control", File.cwd!()),
+        Path.expand("../../SymphonyControl", File.cwd!()),
+        Path.expand("../SymphonyControl", File.cwd!())
+      ]
+      |> Enum.find(fn
+        nil -> false
+        path -> File.dir?(path)
+      end)
+
+    Path.join([control_dir || Path.expand("../../symphony-control", File.cwd!()), "scripts", script_name])
+  end
 end

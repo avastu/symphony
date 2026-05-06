@@ -21,7 +21,8 @@ defmodule SymphonyElixirWeb.Presenter do
           retrying: Enum.map(snapshot.retrying, &retry_entry_payload/1),
           managed_projects: managed_project_payloads(),
           codex_totals: snapshot.codex_totals,
-          rate_limits: snapshot.rate_limits
+          rate_limits: snapshot.rate_limits,
+          deploy_pending: Map.get(snapshot, :deploy_pending)
         }
 
       :timeout ->
