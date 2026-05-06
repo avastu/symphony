@@ -396,16 +396,10 @@ defmodule SymphonyElixir.StatusDashboard do
   end
 
   defp format_project_link_lines do
-    project_part =
-      case Config.settings!().tracker.project_slug do
-        project_slug when is_binary(project_slug) and project_slug != "" ->
-          colorize(linear_project_url(project_slug), @ansi_cyan)
-
-        _ ->
-          colorize("n/a", @ansi_gray)
-      end
-
-    project_line = colorize("│ Project: ", @ansi_bold) <> project_part
+    projects = Config.tracker_projects()
+    project_label = if length(projects) == 1, do: "│ Project: ", else: "│ Projects: "
+    project_part = projects |> format_project_links() |> colorize(@ansi_cyan)
+    project_line = colorize(project_label, @ansi_bold) <> project_part
 
     case dashboard_url() do
       url when is_binary(url) ->
@@ -436,6 +430,31 @@ defmodule SymphonyElixir.StatusDashboard do
   end
 
   defp format_deploy_pending_line(_intent), do: []
+
+  defp format_project_links([]), do: "n/a"
+
+  defp format_project_links(projects) when is_list(projects) do
+    visible_projects = Enum.take(projects, 3)
+    hidden_count = length(projects) - length(visible_projects)
+
+    links =
+      visible_projects
+      |> Enum.map_join(", ", &format_project_link/1)
+
+    if hidden_count > 0 do
+      "#{links}, +#{hidden_count} more"
+    else
+      links
+    end
+  end
+
+  defp format_project_link(%Config.TrackerProject{slug: slug}) when is_binary(slug) and slug != "" do
+    linear_project_url(slug)
+  end
+
+  defp format_project_link(%Config.TrackerProject{name: name}) when is_binary(name) and name != "", do: name
+
+  defp format_project_link(_project), do: "unknown"
 
   defp format_project_refresh_line(%{checking?: true}) do
     colorize("│ Next refresh: ", @ansi_bold) <> colorize("checking now…", @ansi_cyan)

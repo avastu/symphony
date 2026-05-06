@@ -90,6 +90,69 @@ defmodule SymphonyElixir.CoreTest do
     assert {:error, {:unsupported_tracker_kind, "123"}} = Config.validate!()
   end
 
+  test "linear tracker projects preserve legacy fallback and support managed project precedence" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_project_slug: "legacy",
+      tracker_project_slugs: ["secondary"],
+      tracker_managed_projects: [
+        %{name: "Beta Launch Validation", slug: "beta"},
+        %{project: "Disabled Project", slugId: "disabled", active: false},
+        %{project_name: "Iris Personal Agent Stack", slug_id: "iris"},
+        %{name: "Duplicate Beta", project_slug: "beta"}
+      ]
+    )
+
+    assert :ok = Config.validate!()
+
+    assert [
+             %Config.TrackerProject{
+               name: "Beta Launch Validation",
+               slug: "beta",
+               source: "tracker.managed_projects"
+             },
+             %Config.TrackerProject{
+               name: "Iris Personal Agent Stack",
+               slug: "iris",
+               source: "tracker.managed_projects"
+             }
+           ] = Config.tracker_projects()
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_project_slug: nil,
+      tracker_project_slugs: ["beta", %{project_name: "Iris Personal Agent Stack", slugId: "iris"}],
+      tracker_managed_projects: []
+    )
+
+    assert :ok = Config.validate!()
+
+    assert [
+             %Config.TrackerProject{name: nil, slug: "beta", source: "tracker.project_slugs"},
+             %Config.TrackerProject{name: "Iris Personal Agent Stack", slug: "iris", source: "tracker.project_slugs"}
+           ] = Config.tracker_projects()
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_project_slug: "legacy",
+      tracker_project_slugs: [],
+      tracker_managed_projects: []
+    )
+
+    assert [%Config.TrackerProject{name: nil, slug: "legacy", source: "tracker.project_slug"}] =
+             Config.tracker_projects()
+  end
+
+  test "linear config with no active project source keeps missing project slug error" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_project_slug: nil,
+      tracker_project_slugs: [],
+      tracker_managed_projects: [
+        %{name: "Disabled Project", slug: "disabled", active: false}
+      ]
+    )
+
+    assert Config.tracker_projects() == []
+    assert {:error, :missing_linear_project_slug} = Config.validate!()
+  end
+
   test "current WORKFLOW.md file is valid and complete" do
     original_workflow_path = Workflow.workflow_file_path()
     on_exit(fn -> Workflow.set_workflow_file_path(original_workflow_path) end)

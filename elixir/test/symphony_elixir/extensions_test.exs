@@ -320,6 +320,14 @@ defmodule SymphonyElixir.ExtensionsTest do
   end
 
   test "phoenix observability api preserves state, issue, and refresh responses" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_project_slug: "legacy",
+      tracker_managed_projects: [
+        %{name: "Beta Launch Validation", slug: "beta"},
+        %{name: "Iris Personal Agent Stack", slug: "iris"}
+      ]
+    )
+
     snapshot =
       static_snapshot()
       |> Map.put(:deploy_pending, %{
@@ -359,6 +367,7 @@ defmodule SymphonyElixir.ExtensionsTest do
                  "issue_id" => "issue-http",
                  "issue_identifier" => "MT-HTTP",
                  "state" => "In Progress",
+                 "project" => "Beta Launch Validation (beta)",
                  "worker_host" => nil,
                  "workspace_path" => nil,
                  "session_id" => "thread-http",
@@ -375,11 +384,16 @@ defmodule SymphonyElixir.ExtensionsTest do
                  "issue_id" => "issue-retry",
                  "issue_identifier" => "MT-RETRY",
                  "attempt" => 2,
+                 "project" => "Iris Personal Agent Stack (iris)",
                  "due_at" => state_payload["retrying"] |> List.first() |> Map.fetch!("due_at"),
                  "error" => "boom",
                  "worker_host" => nil,
                  "workspace_path" => nil
                }
+             ],
+             "managed_projects" => [
+               %{"name" => "Beta Launch Validation", "slug" => "beta", "source" => "tracker.managed_projects"},
+               %{"name" => "Iris Personal Agent Stack", "slug" => "iris", "source" => "tracker.managed_projects"}
              ],
              "codex_totals" => %{
                "input_tokens" => 4,
@@ -417,6 +431,7 @@ defmodule SymphonyElixir.ExtensionsTest do
                "session_id" => "thread-http",
                "turn_count" => 7,
                "state" => "In Progress",
+               "project" => "Beta Launch Validation (beta)",
                "started_at" => issue_payload["running"]["started_at"],
                "last_event" => "notification",
                "last_message" => "rendered",
@@ -432,7 +447,10 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     conn = get(build_conn(), "/api/v1/MT-RETRY")
 
-    assert %{"status" => "retrying", "retry" => %{"attempt" => 2, "error" => "boom"}} =
+    assert %{
+             "status" => "retrying",
+             "retry" => %{"attempt" => 2, "error" => "boom", "project" => "Iris Personal Agent Stack (iris)"}
+           } =
              json_response(conn, 200)
 
     conn = get(build_conn(), "/api/v1/MT-MISSING")
@@ -638,6 +656,7 @@ defmodule SymphonyElixir.ExtensionsTest do
           issue_id: "issue-http",
           identifier: "MT-HTTP",
           state: "In Progress",
+          project_label: "Beta Launch Validation (beta)",
           session_id: "thread-http",
           turn_count: 8,
           last_codex_event: :notification,
@@ -833,6 +852,7 @@ defmodule SymphonyElixir.ExtensionsTest do
           issue_id: "issue-http",
           identifier: "MT-HTTP",
           state: "In Progress",
+          project_label: "Beta Launch Validation (beta)",
           session_id: "thread-http",
           turn_count: 7,
           codex_app_server_pid: nil,
@@ -850,6 +870,7 @@ defmodule SymphonyElixir.ExtensionsTest do
           issue_id: "issue-retry",
           identifier: "MT-RETRY",
           attempt: 2,
+          project_label: "Iris Personal Agent Stack (iris)",
           due_in_ms: 2_000,
           error: "boom"
         }
