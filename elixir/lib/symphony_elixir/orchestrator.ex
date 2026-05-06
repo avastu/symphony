@@ -1772,6 +1772,19 @@ defmodule SymphonyElixir.Orchestrator do
           release_issue_claim(state, issue_id)
         }
 
+      workpad_blocked?(issue) ->
+        {
+          %{
+            queued: false,
+            coalesced: false,
+            issue_id: issue_id,
+            issue_identifier: issue.identifier,
+            reason: "blocked_review_boundary",
+            operations: ["review_check", "workpad_state:blocked"]
+          },
+          release_issue_claim(state, issue_id)
+        }
+
       changed? ->
         transition_review_issue_to_rework(state, issue)
 

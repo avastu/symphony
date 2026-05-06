@@ -1175,6 +1175,59 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "targeted Human Review check keeps blocked project boundary out of Rework" do
+    previous_memory_issues = Application.get_env(:symphony_elixir, :memory_tracker_issues)
+    previous_memory_recipient = Application.get_env(:symphony_elixir, :memory_tracker_recipient)
+
+    issue = %Issue{
+      id: "issue-uts-99",
+      identifier: "UTS-99",
+      title: "Project cockpit parked behind child issue",
+      state: "Human Review",
+      workpad_state: "blocked",
+      updated_at: ~U[2026-05-06 21:56:00Z],
+      branch_name: "uts-99-project-control",
+      url: "https://linear.app/issue/UTS-99"
+    }
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+      Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+      state = %Orchestrator.State{
+        poll_interval_ms: 30_000,
+        max_concurrent_agents: 1,
+        claimed: MapSet.new(["issue-uts-99"]),
+        review_checkpoints: %{
+          "issue-uts-99" => %{
+            state: "Human Review",
+            workpad_state: nil,
+            updated_at: ~U[2026-05-06 21:54:00Z],
+            branch_name: "uts-99-project-control",
+            url: "https://linear.app/issue/UTS-99"
+          }
+        },
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+        codex_rate_limits: nil
+      }
+
+      assert {:reply, payload, updated_state} =
+               Orchestrator.handle_call({:request_review_check, "issue-uts-99"}, {self(), make_ref()}, state)
+
+      assert payload.queued == false
+      assert payload.reason == "blocked_review_boundary"
+      assert payload.operations == ["review_check", "workpad_state:blocked"]
+      refute_receive {:memory_tracker_state_update, "issue-uts-99", "Rework"}, 50
+      refute MapSet.member?(updated_state.claimed, "issue-uts-99")
+      assert updated_state.review_checkpoints["issue-uts-99"].state == "Human Review"
+      assert updated_state.review_checkpoints["issue-uts-99"].workpad_state == "blocked"
+    after
+      restore_app_env(:memory_tracker_issues, previous_memory_issues)
+      restore_app_env(:memory_tracker_recipient, previous_memory_recipient)
+    end
+  end
+
   test "select_worker_host_for_test skips full ssh hosts under the shared per-host cap" do
     write_workflow_file!(Workflow.workflow_file_path(),
       worker_ssh_hosts: ["worker-a", "worker-b"],

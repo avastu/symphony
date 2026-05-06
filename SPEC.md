@@ -1217,6 +1217,10 @@ Symphony does not require first-class tracker write APIs in the orchestrator.
 - The service remains a scheduler/runner and tracker reader.
 - Workflow-specific success often means "reached the next handoff state" (for example
   `Human Review`) rather than tracker terminal state `Done`.
+- `Human Review` issues whose current workpad has `State: blocked` are stable
+  non-implementation boundaries. A changed checkpoint for that boundary MUST NOT
+  be converted to `Rework` unless an explicit human review/change signal is
+  available.
 - If the `linear_graphql` client-side tool extension is implemented, it is still part of the agent
   toolchain rather than orchestrator business logic.
 
