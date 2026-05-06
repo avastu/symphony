@@ -706,6 +706,45 @@ defmodule SymphonyElixir.CoreTest do
     refute MapSet.member?(state.claimed, issue_id)
   end
 
+  test "normal worker exit with local publish-blocked workpad does not schedule continuation retry" do
+    issue_id = "issue-ready-local-workpad"
+    ref = make_ref()
+    orchestrator_name = Module.concat(__MODULE__, :ReadyLocalWorkpadContinuationOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    initial_state = :sys.get_state(pid)
+
+    running_entry = %{
+      pid: self(),
+      ref: ref,
+      identifier: "UTS-112",
+      issue: %Issue{id: issue_id, identifier: "UTS-112", state: "Rework", workpad_state: "ready_for_review_local"},
+      started_at: DateTime.utc_now()
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.new([issue_id]))
+      |> Map.put(:retry_attempts, %{})
+    end)
+
+    send(pid, {:DOWN, ref, :process, self(), :normal})
+    Process.sleep(50)
+    state = :sys.get_state(pid)
+
+    refute Map.has_key?(state.running, issue_id)
+    assert MapSet.member?(state.completed, issue_id)
+    refute Map.has_key?(state.retry_attempts, issue_id)
+    refute MapSet.member?(state.claimed, issue_id)
+  end
+
   test "abnormal worker exit increments retry attempt progressively" do
     issue_id = "issue-crash"
     ref = make_ref()
@@ -949,6 +988,59 @@ defmodule SymphonyElixir.CoreTest do
       assert_receive {:memory_tracker_state_update, "issue-uts-43", "Rework"}
       assert MapSet.member?(updated_state.claimed, "issue-uts-43")
       assert updated_state.review_checkpoints["issue-uts-43"].state == "Rework"
+    after
+      restore_app_env(:memory_tracker_issues, previous_memory_issues)
+      restore_app_env(:memory_tracker_recipient, previous_memory_recipient)
+    end
+  end
+
+  test "targeted Human Review check keeps local publish-blocked work out of Rework" do
+    previous_memory_issues = Application.get_env(:symphony_elixir, :memory_tracker_issues)
+    previous_memory_recipient = Application.get_env(:symphony_elixir, :memory_tracker_recipient)
+
+    issue = %Issue{
+      id: "issue-uts-112",
+      identifier: "UTS-112",
+      title: "Validated local work blocked on publish",
+      state: "Human Review",
+      workpad_state: "ready_for_review_local",
+      updated_at: ~U[2026-05-06 08:00:00Z],
+      branch_name: "uts-112-iris-contracts",
+      url: "https://linear.app/issue/UTS-112"
+    }
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+      Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+      state = %Orchestrator.State{
+        poll_interval_ms: 30_000,
+        max_concurrent_agents: 1,
+        claimed: MapSet.new(["issue-uts-112"]),
+        review_checkpoints: %{
+          "issue-uts-112" => %{
+            state: "Human Review",
+            workpad_state: nil,
+            updated_at: ~U[2026-05-06 07:00:00Z],
+            branch_name: "uts-112-iris-contracts",
+            url: "https://linear.app/issue/UTS-112"
+          }
+        },
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+        codex_rate_limits: nil
+      }
+
+      assert {:reply, payload, updated_state} =
+               Orchestrator.handle_call({:request_review_check, "issue-uts-112"}, {self(), make_ref()}, state)
+
+      assert payload.queued == false
+      assert payload.reason == "publish_blocked_local_review"
+      assert payload.operations == ["review_check", "state:ready_for_review_local"]
+      refute_receive {:memory_tracker_state_update, "issue-uts-112", "Rework"}, 50
+      refute MapSet.member?(updated_state.claimed, "issue-uts-112")
+      assert updated_state.review_checkpoints["issue-uts-112"].state == "Human Review"
+      assert updated_state.review_checkpoints["issue-uts-112"].workpad_state == "ready_for_review_local"
     after
       restore_app_env(:memory_tracker_issues, previous_memory_issues)
       restore_app_env(:memory_tracker_recipient, previous_memory_recipient)
@@ -1733,6 +1825,103 @@ defmodule SymphonyElixir.CoreTest do
 
       assert :ok = AgentRunner.run(issue, nil, issue_state_fetcher: state_fetcher)
       assert_receive :blocked_issue_state_fetch
+
+      trace = File.read!(trace_file)
+      assert length(String.split(trace, "RUN", trim: true)) == 1
+      assert length(Regex.scan(~r/"method":"turn\/start"/, trace)) == 1
+    after
+      System.delete_env("SYMP_TEST_CODEx_TRACE")
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "agent runner does not continue when refreshed workpad is local publish-blocked" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-agent-runner-ready-local-continuation-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      template_repo = Path.join(test_root, "source")
+      workspace_root = Path.join(test_root, "workspaces")
+      codex_binary = Path.join(test_root, "fake-codex")
+      trace_file = Path.join(test_root, "codex.trace")
+
+      File.mkdir_p!(template_repo)
+      File.write!(Path.join(template_repo, "README.md"), "# test")
+      System.cmd("git", ["-C", template_repo, "init", "-b", "main"])
+      System.cmd("git", ["-C", template_repo, "config", "user.name", "Test User"])
+      System.cmd("git", ["-C", template_repo, "config", "user.email", "test@example.com"])
+      System.cmd("git", ["-C", template_repo, "add", "README.md"])
+      System.cmd("git", ["-C", template_repo, "commit", "-m", "initial"])
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      trace_file="${SYMP_TEST_CODEx_TRACE:-/tmp/codex.trace}"
+      printf 'RUN\\n' >> "$trace_file"
+      count=0
+
+      while IFS= read -r line; do
+        count=$((count + 1))
+        printf 'JSON:%s\\n' "$line" >> "$trace_file"
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-ready-local"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-ready-local-1"}}}'
+            printf '%s\\n' '{"method":"turn/completed"}'
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+      System.put_env("SYMP_TEST_CODEx_TRACE", trace_file)
+
+      on_exit(fn -> System.delete_env("SYMP_TEST_CODEx_TRACE") end)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        hook_after_create: "cp #{Path.join(template_repo, "README.md")} README.md",
+        codex_command: "#{codex_binary} app-server",
+        max_turns: 3
+      )
+
+      state_fetcher = fn [_issue_id] ->
+        send(self(), :ready_local_issue_state_fetch)
+
+        {:ok,
+         [
+           %Issue{
+             id: "issue-ready-local-continuation",
+             identifier: "UTS-112",
+             title: "Do not continue",
+             description: "Validated local work is publish-blocked",
+             state: "Rework",
+             workpad_state: "ready_for_review_local"
+           }
+         ]}
+      end
+
+      issue = %Issue{
+        id: "issue-ready-local-continuation",
+        identifier: "UTS-112",
+        title: "Do not continue",
+        description: "Validated local work is publish-blocked",
+        state: "Rework",
+        url: "https://example.org/issues/UTS-112",
+        labels: []
+      }
+
+      assert :ok = AgentRunner.run(issue, nil, issue_state_fetcher: state_fetcher)
+      assert_receive :ready_local_issue_state_fetch
 
       trace = File.read!(trace_file)
       assert length(String.split(trace, "RUN", trim: true)) == 1

@@ -797,6 +797,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp issue_blocked?(%Issue{} = issue, terminal_states) do
     blocked_by_non_terminal?(issue.blocked_by, terminal_states) or
+      workpad_publish_blocked?(issue) or
       (workpad_blocked?(issue) and issue.blocked_by == [])
   end
 
@@ -805,6 +806,12 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp workpad_blocked?(_issue), do: false
+
+  defp workpad_publish_blocked?(%Issue{workpad_state: workpad_state}) when is_binary(workpad_state) do
+    normalize_issue_state(workpad_state) == "ready_for_review_local"
+  end
+
+  defp workpad_publish_blocked?(_issue), do: false
 
   defp blocked_by_non_terminal?(blockers, terminal_states) when is_list(blockers) do
     Enum.any?(blockers, fn
@@ -1652,6 +1659,19 @@ defmodule SymphonyElixir.Orchestrator do
           dispatch_issue(state, issue, %{delay_type: :review_check}, nil)
         }
 
+      human_review_state?(issue.state) and workpad_publish_blocked?(issue) ->
+        {
+          %{
+            queued: false,
+            coalesced: false,
+            issue_id: issue_id,
+            issue_identifier: issue.identifier,
+            reason: "publish_blocked_local_review",
+            operations: ["review_check", "state:ready_for_review_local"]
+          },
+          release_issue_claim(state, issue_id)
+        }
+
       human_review_state?(issue.state) and changed? ->
         transition_review_issue_to_rework(state, issue)
 
@@ -1750,6 +1770,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp review_checkpoint(%Issue{} = issue) do
     %{
       state: issue.state,
+      workpad_state: issue.workpad_state,
       updated_at: issue.updated_at,
       branch_name: issue.branch_name,
       url: issue.url

@@ -178,6 +178,7 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp issue_blocked?(%Issue{} = issue) do
     blocked_by_non_terminal?(issue.blocked_by) or
+      workpad_publish_blocked?(issue) or
       (workpad_blocked?(issue) and issue.blocked_by == [])
   end
 
@@ -186,6 +187,12 @@ defmodule SymphonyElixir.AgentRunner do
   end
 
   defp workpad_blocked?(_issue), do: false
+
+  defp workpad_publish_blocked?(%Issue{workpad_state: workpad_state}) when is_binary(workpad_state) do
+    normalize_issue_state(workpad_state) == "ready_for_review_local"
+  end
+
+  defp workpad_publish_blocked?(_issue), do: false
 
   defp blocked_by_non_terminal?(blockers) when is_list(blockers) do
     terminal_states =
