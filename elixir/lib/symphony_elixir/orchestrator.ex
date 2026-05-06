@@ -1659,7 +1659,27 @@ defmodule SymphonyElixir.Orchestrator do
           dispatch_issue(state, issue, %{delay_type: :review_check}, nil)
         }
 
-      human_review_state?(issue.state) and workpad_publish_blocked?(issue) ->
+      human_review_state?(issue.state) ->
+        handle_human_review_check_issue(state, issue, changed?)
+
+      true ->
+        {
+          %{
+            queued: false,
+            coalesced: false,
+            issue_id: issue_id,
+            issue_identifier: issue.identifier,
+            reason: "not_dispatchable",
+            operations: ["review_check"]
+          },
+          release_issue_claim(state, issue_id)
+        }
+    end
+  end
+
+  defp handle_human_review_check_issue(%State{} = state, %Issue{id: issue_id} = issue, changed?) do
+    cond do
+      workpad_publish_blocked?(issue) ->
         {
           %{
             queued: false,
@@ -1672,10 +1692,10 @@ defmodule SymphonyElixir.Orchestrator do
           release_issue_claim(state, issue_id)
         }
 
-      human_review_state?(issue.state) and changed? ->
+      changed? ->
         transition_review_issue_to_rework(state, issue)
 
-      human_review_state?(issue.state) ->
+      true ->
         {
           %{
             queued: false,
@@ -1683,19 +1703,6 @@ defmodule SymphonyElixir.Orchestrator do
             issue_id: issue_id,
             issue_identifier: issue.identifier,
             reason: "review_checkpoint_unchanged",
-            operations: ["review_check"]
-          },
-          release_issue_claim(state, issue_id)
-        }
-
-      true ->
-        {
-          %{
-            queued: false,
-            coalesced: false,
-            issue_id: issue_id,
-            issue_identifier: issue.identifier,
-            reason: "not_dispatchable",
             operations: ["review_check"]
           },
           release_issue_claim(state, issue_id)
