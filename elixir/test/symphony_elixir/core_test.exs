@@ -1101,7 +1101,7 @@ defmodule SymphonyElixir.CoreTest do
 
       assert payload.queued == false
       assert payload.reason == "publish_blocked_local_review"
-      assert payload.operations == ["review_check", "state:ready_for_review_local"]
+      assert payload.operations == ["review_check", "workpad_state:ready_for_review_local"]
       refute_receive {:memory_tracker_state_update, "issue-uts-112", "Rework"}, 50
       refute MapSet.member?(updated_state.claimed, "issue-uts-112")
       assert updated_state.review_checkpoints["issue-uts-112"].state == "Human Review"

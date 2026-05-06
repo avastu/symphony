@@ -1687,7 +1687,7 @@ defmodule SymphonyElixir.Orchestrator do
             issue_id: issue_id,
             issue_identifier: issue.identifier,
             reason: "publish_blocked_local_review",
-            operations: ["review_check", "state:ready_for_review_local"]
+            operations: ["review_check", "workpad_state:ready_for_review_local"]
           },
           release_issue_claim(state, issue_id)
         }
