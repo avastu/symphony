@@ -361,6 +361,70 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "local publish-blocked workpad stops running agent without cleaning workspace" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-ready-local-reconcile-#{System.unique_integer([:positive])}"
+      )
+
+    issue_id = "issue-ready-local-reconcile"
+    issue_identifier = "UTS-112"
+    workspace = Path.join(test_root, issue_identifier)
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: test_root,
+        tracker_active_states: ["Todo", "In Progress", "Rework"],
+        tracker_terminal_states: ["Closed", "Cancelled", "Canceled", "Duplicate"]
+      )
+
+      File.mkdir_p!(test_root)
+      File.mkdir_p!(workspace)
+
+      agent_pid =
+        spawn(fn ->
+          receive do
+            :stop -> :ok
+          end
+        end)
+
+      state = %Orchestrator.State{
+        running: %{
+          issue_id => %{
+            pid: agent_pid,
+            ref: nil,
+            identifier: issue_identifier,
+            issue: %Issue{id: issue_id, state: "Rework", identifier: issue_identifier},
+            started_at: DateTime.utc_now()
+          }
+        },
+        claimed: MapSet.new([issue_id]),
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+        retry_attempts: %{}
+      }
+
+      issue = %Issue{
+        id: issue_id,
+        identifier: issue_identifier,
+        state: "Rework",
+        workpad_state: "ready_for_review_local",
+        title: "Validated local work blocked on publish",
+        description: "Implementation is complete and local artifacts must be preserved.",
+        labels: []
+      }
+
+      updated_state = Orchestrator.reconcile_issue_states_for_test([issue], state)
+
+      refute Map.has_key?(updated_state.running, issue_id)
+      refute MapSet.member?(updated_state.claimed, issue_id)
+      refute Process.alive?(agent_pid)
+      assert File.exists?(workspace)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "terminal issue state stops running agent and cleans workspace" do
     test_root =
       Path.join(
@@ -970,6 +1034,7 @@ defmodule SymphonyElixir.CoreTest do
         review_checkpoints: %{
           "issue-uts-43" => %{
             state: "Human Review",
+            workpad_state: nil,
             updated_at: ~U[2026-04-29 20:00:00Z],
             branch_name: "uts-43-feedback",
             url: "https://linear.app/issue/UTS-43"
