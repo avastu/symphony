@@ -3,6 +3,45 @@ defmodule SymphonyElixir.AttentionInboxTest do
 
   alias SymphonyElixir.AttentionInbox
 
+  test "default commands resolve through Symphony control directory" do
+    dir = Path.join(System.tmp_dir!(), "symphony-attention-command-test-#{System.unique_integer([:positive])}")
+    scripts_dir = Path.join(dir, "scripts")
+    File.mkdir_p!(scripts_dir)
+
+    inbox_command = Path.join(scripts_dir, "attention-inbox")
+    reply_command = Path.join(scripts_dir, "attention-reply")
+    reply_output = Path.join(dir, "reply-args.txt")
+
+    File.write!(inbox_command, "#!/bin/sh\nprintf '[]'\n")
+
+    File.write!(
+      reply_command,
+      "#!/bin/sh\nprintf '%s\\n' \"$@\" > #{Path.expand(reply_output)}\n"
+    )
+
+    File.chmod!(inbox_command, 0o755)
+    File.chmod!(reply_command, 0o755)
+
+    previous_control_dir = System.get_env("SYMPHONY_CONTROL_DIR")
+    previous_inbox_command = System.get_env("SYMPHONY_ATTENTION_INBOX_COMMAND")
+    previous_reply_command = System.get_env("SYMPHONY_ATTENTION_REPLY_COMMAND")
+
+    try do
+      System.put_env("SYMPHONY_CONTROL_DIR", dir)
+      System.delete_env("SYMPHONY_ATTENTION_INBOX_COMMAND")
+      System.delete_env("SYMPHONY_ATTENTION_REPLY_COMMAND")
+
+      assert AttentionInbox.default_fetch() == {:ok, "[]"}
+      assert AttentionInbox.default_reply("UTS-1", "Approved.") == :ok
+      assert File.read!(reply_output) =~ "--issue\nUTS-1\n--body\nApproved.\n--post"
+    after
+      restore_env("SYMPHONY_CONTROL_DIR", previous_control_dir)
+      restore_env("SYMPHONY_ATTENTION_INBOX_COMMAND", previous_inbox_command)
+      restore_env("SYMPHONY_ATTENTION_REPLY_COMMAND", previous_reply_command)
+      File.rm_rf(dir)
+    end
+  end
+
   test "refresh caches prioritized attention items and extracts deployment links" do
     fetch_counter = start_supervised!({Agent, fn -> 0 end})
 
@@ -156,4 +195,7 @@ defmodule SymphonyElixir.AttentionInboxTest do
              {"UTS-9", "Revise plan: ship with screenshots"}
            ]
   end
+
+  defp restore_env(key, nil), do: System.delete_env(key)
+  defp restore_env(key, value), do: System.put_env(key, value)
 end

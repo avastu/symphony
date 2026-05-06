@@ -317,6 +317,7 @@ defmodule SymphonyElixir.StatusDashboard do
              retrying: retrying,
              codex_totals: codex_totals,
              rate_limits: Map.get(snapshot, :rate_limits),
+             deploy_pending: Map.get(snapshot, :deploy_pending),
              polling: Map.get(snapshot, :polling)
            }},
           update_token_samples(token_samples, now_ms, total_tokens)
@@ -334,6 +335,7 @@ defmodule SymphonyElixir.StatusDashboard do
     case snapshot_data do
       {:ok, %{running: running, retrying: retrying, codex_totals: codex_totals} = snapshot} ->
         rate_limits = Map.get(snapshot, :rate_limits)
+        deploy_pending = Map.get(snapshot, :deploy_pending)
         project_link_lines = format_project_link_lines()
         project_refresh_line = format_project_refresh_line(Map.get(snapshot, :polling))
         codex_input_tokens = Map.get(codex_totals, :input_tokens, 0)
@@ -363,6 +365,7 @@ defmodule SymphonyElixir.StatusDashboard do
              colorize(" | ", @ansi_gray) <>
              colorize("total #{format_count(codex_total_tokens)}", @ansi_yellow),
            colorize("│ Rate Limits: ", @ansi_bold) <> format_rate_limits(rate_limits),
+           format_deploy_pending_line(deploy_pending),
            project_link_lines,
            project_refresh_line,
            colorize("├─ Running", @ansi_bold),
@@ -412,6 +415,27 @@ defmodule SymphonyElixir.StatusDashboard do
         [project_line]
     end
   end
+
+  defp format_deploy_pending_line(%{active: true} = intent) do
+    status = Map.get(intent, :status) || "unknown"
+    target = Map.get(intent, :target) || "unknown"
+    running = Map.get(intent, :running_count) || 0
+    retrying = Map.get(intent, :retrying_count) || 0
+    blocker = Map.get(intent, :blocker)
+    color = if status == "failed", do: @ansi_red, else: @ansi_orange
+
+    line = "│ Deploy pending: #{status} #{running} running / #{retrying} retrying target=#{target}"
+
+    case blocker do
+      blocker when is_binary(blocker) and blocker != "" ->
+        colorize("#{line} blocker=#{blocker}", color)
+
+      _ ->
+        colorize(line, color)
+    end
+  end
+
+  defp format_deploy_pending_line(_intent), do: []
 
   defp format_project_refresh_line(%{checking?: true}) do
     colorize("│ Next refresh: ", @ansi_bold) <> colorize("checking now…", @ansi_cyan)
@@ -562,6 +586,7 @@ defmodule SymphonyElixir.StatusDashboard do
              retrying: retrying,
              codex_totals: codex_totals,
              rate_limits: Map.get(snapshot, :rate_limits),
+             deploy_pending: Map.get(snapshot, :deploy_pending),
              polling: Map.get(snapshot, :polling)
            }}
 

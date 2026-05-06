@@ -135,6 +135,23 @@ defmodule SymphonyElixirWeb.DashboardLive do
           </article>
         </section>
 
+        <section :if={@payload.deploy_pending && @payload.deploy_pending.active} class="section-card">
+          <div class="section-header">
+            <div>
+              <h2 class="section-title">Deploy pending</h2>
+              <p class="section-copy">
+                <%= @payload.deploy_pending.status %>:
+                <%= @payload.deploy_pending.running_count || 0 %> running /
+                <%= @payload.deploy_pending.retrying_count || 0 %> retrying for
+                <%= @payload.deploy_pending.target %>.
+              </p>
+            </div>
+          </div>
+          <p :if={@payload.deploy_pending.blocker} class="attention-error">
+            <%= @payload.deploy_pending.blocker %>
+          </p>
+        </section>
+
         <section class="section-card">
           <div class="section-header">
             <div>
