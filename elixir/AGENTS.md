@@ -22,6 +22,8 @@ This directory contains the Elixir agent orchestration service that polls Linear
   - Never run Codex turn cwd in source repo.
   - Workspaces must stay under configured workspace root.
 - Orchestrator behavior is stateful and concurrency-sensitive; preserve retry, reconciliation, and cleanup semantics.
+- Treat orchestrator callbacks, snapshot APIs, LiveView/API presenters, and Codex event ingestion as hot paths. Codex can emit high-volume token/rate-limit/tool events across multiple concurrent workers; do not add synchronous file/network work, unbounded scans, or expensive formatting to those paths without batching, debouncing, caching, or moving the work out of the GenServer call path.
+- For dashboard and observability changes, validate behavior while agents are actively streaming, not only in idle snapshots. Check API latency, mailbox/backpressure risk, log volume, durable-write frequency, and whether a slow metrics/log/persistence path can make `/api/v1/state` or LiveView snapshots time out.
 - Follow `docs/logging.md` for logging conventions and required issue/session context fields.
 
 ## Tests and Validation
