@@ -127,6 +127,12 @@ defmodule SymphonyElixirWeb.DashboardLive do
           </article>
 
           <article class="metric-card">
+            <p class="metric-label">Completed</p>
+            <p class="metric-value numeric"><%= format_int(@payload.counts.completed) %></p>
+            <p class="metric-detail">Unique issues completed across persisted runtime history.</p>
+          </article>
+
+          <article class="metric-card">
             <p class="metric-label">Total tokens</p>
             <p class="metric-value numeric"><%= format_int(@payload.codex_totals.total_tokens) %></p>
             <p class="metric-detail numeric">
@@ -138,6 +144,18 @@ defmodule SymphonyElixirWeb.DashboardLive do
             <p class="metric-label">Runtime</p>
             <p class="metric-value numeric"><%= format_runtime_seconds(total_runtime_seconds(@payload, @now)) %></p>
             <p class="metric-detail">Total Codex runtime across completed and active sessions.</p>
+          </article>
+
+          <article class="metric-card">
+            <p class="metric-label">Session limit</p>
+            <p class="metric-value numeric"><%= format_percent(@payload.rate_limit_summary.session_remaining_percent) %></p>
+            <p class="metric-detail">Codex session window remaining.</p>
+          </article>
+
+          <article class="metric-card">
+            <p class="metric-label">Weekly limit</p>
+            <p class="metric-value numeric"><%= format_percent(@payload.rate_limit_summary.weekly_remaining_percent) %></p>
+            <p class="metric-detail">Codex weekly window remaining.</p>
           </article>
         </section>
 
@@ -210,17 +228,6 @@ defmodule SymphonyElixirWeb.DashboardLive do
               </table>
             </div>
           <% end %>
-        </section>
-
-        <section class="section-card">
-          <div class="section-header">
-            <div>
-              <h2 class="section-title">Rate limits</h2>
-              <p class="section-copy">Latest upstream rate-limit snapshot, when available.</p>
-            </div>
-          </div>
-
-          <pre class="code-panel"><%= pretty_value(@payload.rate_limits) %></pre>
         </section>
 
         <section class="section-card attention-section">
@@ -565,9 +572,25 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
   defp format_runtime_seconds(seconds) when is_number(seconds) do
     whole_seconds = max(trunc(seconds), 0)
-    mins = div(whole_seconds, 60)
+    years = div(whole_seconds, 31_536_000)
+    days = whole_seconds |> rem(31_536_000) |> div(86_400)
+    hours = whole_seconds |> rem(86_400) |> div(3_600)
+    mins = whole_seconds |> rem(3_600) |> div(60)
     secs = rem(whole_seconds, 60)
-    "#{mins}m #{secs}s"
+
+    [
+      {years, "y"},
+      {days, "d"},
+      {hours, "h"},
+      {mins, "m"},
+      {secs, "s"}
+    ]
+    |> Enum.drop_while(fn {value, _unit} -> value == 0 end)
+    |> Enum.take(2)
+    |> case do
+      [] -> "0m"
+      parts -> Enum.map_join(parts, " ", fn {value, unit} -> "#{value}#{unit}" end)
+    end
   end
 
   defp runtime_seconds_from_started_at(%DateTime{} = started_at, %DateTime{} = now) do
@@ -592,6 +615,20 @@ defmodule SymphonyElixirWeb.DashboardLive do
   end
 
   defp format_int(_value), do: "n/a"
+
+  defp format_percent(value) when is_number(value) do
+    rounded =
+      value
+      |> Kernel.*(1.0)
+      |> Float.round(1)
+      |> :erlang.float_to_binary(decimals: 1)
+      |> String.trim_trailing("0")
+      |> String.trim_trailing(".")
+
+    "#{rounded}%"
+  end
+
+  defp format_percent(_value), do: "n/a"
 
   defp state_badge_class(state) do
     base = "state-badge"
@@ -644,7 +681,4 @@ defmodule SymphonyElixirWeb.DashboardLive do
   defp schedule_runtime_tick do
     Process.send_after(self(), :runtime_tick, @runtime_tick_ms)
   end
-
-  defp pretty_value(nil), do: "n/a"
-  defp pretty_value(value), do: inspect(value, pretty: true, limit: :infinity)
 end

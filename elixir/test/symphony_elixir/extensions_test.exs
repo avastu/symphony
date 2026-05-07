@@ -361,7 +361,7 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     assert state_payload == %{
              "generated_at" => state_payload["generated_at"],
-             "counts" => %{"running" => 1, "pending_slot" => 1, "retrying" => 1},
+             "counts" => %{"running" => 1, "pending_slot" => 1, "retrying" => 1, "completed" => 0},
              "running" => [
                %{
                  "issue_id" => "issue-http",
@@ -413,7 +413,17 @@ defmodule SymphonyElixir.ExtensionsTest do
                "total_tokens" => 12,
                "seconds_running" => 42.5
              },
-             "rate_limits" => %{"primary" => %{"remaining" => 11}},
+             "completed_count" => 0,
+             "rate_limits" => %{
+               "primary" => %{"usedPercent" => 25, "windowDurationMins" => 300},
+               "secondary" => %{"usedPercent" => 60, "windowDurationMins" => 10_080}
+             },
+             "rate_limit_summary" => %{
+               "session_remaining_percent" => 75,
+               "weekly_remaining_percent" => 40,
+               "session_reset" => nil,
+               "weekly_reset" => nil
+             },
              "deploy_pending" => %{
                "active" => true,
                "target" => "control",
@@ -488,6 +498,37 @@ defmodule SymphonyElixir.ExtensionsTest do
              json_response(conn, 202)
   end
 
+  test "phoenix observability api summarizes alternate rate-limit payload shapes" do
+    orchestrator_name = Module.concat(__MODULE__, :RateLimitSummaryOrchestrator)
+
+    snapshot =
+      static_snapshot()
+      |> Map.put(:rate_limits, %{
+        "primary" => %{
+          "remaining" => 40,
+          "limit" => 80,
+          "resetAt" => "2026-05-07T20:00:00Z"
+        },
+        "secondary" => %{
+          "remainingPercent" => "12.5",
+          "windowDurationMins" => 10_080,
+          "resetsAt" => "2026-05-11T00:00:00Z"
+        }
+      })
+
+    {:ok, _pid} = StaticOrchestrator.start_link(name: orchestrator_name, snapshot: snapshot)
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
+
+    assert %{
+             "rate_limit_summary" => %{
+               "session_remaining_percent" => 50.0,
+               "weekly_remaining_percent" => 12.5,
+               "session_reset" => "2026-05-07T20:00:00Z",
+               "weekly_reset" => "2026-05-11T00:00:00Z"
+             }
+           } = json_response(get(build_conn(), "/api/v1/state"), 200)
+  end
+
   test "phoenix observability api preserves 405, 404, and unavailable behavior" do
     unavailable_orchestrator = Module.concat(__MODULE__, :UnavailableOrchestrator)
     start_test_endpoint(orchestrator: unavailable_orchestrator, snapshot_timeout_ms: 5)
@@ -522,6 +563,133 @@ defmodule SymphonyElixir.ExtensionsTest do
                  "message" => "Orchestrator is unavailable"
                }
              }
+  end
+
+  test "observability metrics persist token runtime and completed issue totals" do
+    metrics_file =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-observability-metrics-#{System.unique_integer([:positive])}.json"
+      )
+
+    Application.put_env(:symphony_elixir, :observability_metrics_file, metrics_file)
+
+    started_at = DateTime.utc_now() |> DateTime.add(-125, :second)
+
+    :ok =
+      SymphonyElixir.ObservabilityMetrics.record_token_delta(%{
+        input_tokens: 10,
+        output_tokens: 5,
+        total_tokens: 15
+      })
+
+    :ok = SymphonyElixir.ObservabilityMetrics.record_session_completion(%{started_at: started_at})
+
+    running_entry = %{
+      identifier: "MT-DONE",
+      issue: %Issue{id: "issue-done", identifier: "MT-DONE", state: "Done"},
+      session_id: "thread-done"
+    }
+
+    :ok = SymphonyElixir.ObservabilityMetrics.record_completed_issue("issue-done", running_entry)
+    :ok = SymphonyElixir.ObservabilityMetrics.record_completed_issue("issue-done", running_entry)
+
+    snapshot = SymphonyElixir.ObservabilityMetrics.snapshot()
+
+    assert snapshot.codex_totals.input_tokens == 10
+    assert snapshot.codex_totals.output_tokens == 5
+    assert snapshot.codex_totals.total_tokens == 15
+    assert snapshot.codex_totals.seconds_running >= 120
+    assert snapshot.completed_count == 1
+    assert snapshot.completed_issues["issue-done"]["issue_identifier"] == "MT-DONE"
+  end
+
+  test "observability metrics load existing JSON and normalize missing files" do
+    missing_file =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-observability-missing-#{System.unique_integer([:positive])}.json"
+      )
+
+    Application.put_env(:symphony_elixir, :observability_metrics_file, missing_file)
+
+    assert SymphonyElixir.ObservabilityMetrics.path() == missing_file
+    assert SymphonyElixir.ObservabilityMetrics.codex_totals().total_tokens == 0
+    assert SymphonyElixir.ObservabilityMetrics.completed_count() == 0
+
+    persisted = %{
+      "codex_totals" => %{
+        "input_tokens" => 20,
+        "output_tokens" => 8,
+        "total_tokens" => 28,
+        "seconds_running" => 300
+      },
+      "completed_issues" => %{
+        "issue-1" => %{"issue_identifier" => "MT-1"}
+      },
+      "updated_at" => "2026-05-07T00:00:00Z"
+    }
+
+    File.mkdir_p!(Path.dirname(missing_file))
+    File.write!(missing_file, Jason.encode!(persisted))
+
+    snapshot = SymphonyElixir.ObservabilityMetrics.snapshot()
+    assert snapshot.codex_totals.input_tokens == 20
+    assert snapshot.codex_totals.output_tokens == 8
+    assert snapshot.codex_totals.total_tokens == 28
+    assert snapshot.codex_totals.seconds_running == 300
+    assert snapshot.completed_count == 1
+    assert snapshot.updated_at == "2026-05-07T00:00:00Z"
+  end
+
+  test "observability metrics normalize invalid persisted fields and issue metadata" do
+    metrics_file =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-observability-invalid-fields-#{System.unique_integer([:positive])}.json"
+      )
+
+    Application.put_env(:symphony_elixir, :observability_metrics_file, metrics_file)
+
+    File.write!(
+      metrics_file,
+      Jason.encode!(%{
+        "codex_totals" => "invalid",
+        "completed_issues" => ["invalid"]
+      })
+    )
+
+    assert SymphonyElixir.ObservabilityMetrics.snapshot() == SymphonyElixir.ObservabilityMetrics.empty()
+
+    assert :ok =
+             SymphonyElixir.ObservabilityMetrics.record_completed_issue("issue-no-metadata", %{
+               identifier: "MT-NO-META"
+             })
+
+    snapshot = SymphonyElixir.ObservabilityMetrics.snapshot()
+    assert snapshot.completed_count == 1
+    assert snapshot.completed_issues["issue-no-metadata"]["issue_identifier"] == "MT-NO-META"
+    assert snapshot.completed_issues["issue-no-metadata"]["state"] == nil
+    assert snapshot.completed_issues["issue-no-metadata"]["project"] == nil
+  end
+
+  test "observability metrics tolerate malformed persisted data and no-op inputs" do
+    metrics_file =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-observability-bad-#{System.unique_integer([:positive])}.json"
+      )
+
+    Application.put_env(:symphony_elixir, :observability_metrics_file, metrics_file)
+    File.write!(metrics_file, "not json")
+
+    assert capture_log(fn ->
+             assert SymphonyElixir.ObservabilityMetrics.snapshot() == SymphonyElixir.ObservabilityMetrics.empty()
+           end) =~ "Failed to load observability metrics"
+
+    assert :ok = SymphonyElixir.ObservabilityMetrics.record_token_delta(%{})
+    assert :ok = SymphonyElixir.ObservabilityMetrics.record_session_completion(%{})
+    assert :ok = SymphonyElixir.ObservabilityMetrics.record_completed_issue(nil, %{})
   end
 
   test "phoenix observability api exposes cached attention inbox and guarded actions" do
@@ -826,7 +994,7 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     response = Req.get!("http://127.0.0.1:#{port}/api/v1/state")
     assert response.status == 200
-    assert response.body["counts"] == %{"running" => 1, "pending_slot" => 1, "retrying" => 1}
+    assert response.body["counts"] == %{"running" => 1, "pending_slot" => 1, "retrying" => 1, "completed" => 0}
 
     dashboard_css = Req.get!("http://127.0.0.1:#{port}/dashboard.css")
     assert dashboard_css.status == 200
@@ -911,7 +1079,10 @@ defmodule SymphonyElixir.ExtensionsTest do
         }
       ],
       codex_totals: %{input_tokens: 4, output_tokens: 8, total_tokens: 12, seconds_running: 42.5},
-      rate_limits: %{"primary" => %{"remaining" => 11}}
+      rate_limits: %{
+        "primary" => %{"usedPercent" => 25, "windowDurationMins" => 300},
+        "secondary" => %{"usedPercent" => 60, "windowDurationMins" => 10_080}
+      }
     }
   end
 

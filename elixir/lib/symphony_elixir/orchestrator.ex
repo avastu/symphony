@@ -7,7 +7,7 @@ defmodule SymphonyElixir.Orchestrator do
   require Logger
   import Bitwise, only: [<<<: 2, &&&: 2]
 
-  alias SymphonyElixir.{AgentRunner, Config, DeployIntent, StatusDashboard, Tracker, Workspace}
+  alias SymphonyElixir.{AgentRunner, Config, DeployIntent, ObservabilityMetrics, StatusDashboard, Tracker, Workspace}
   alias SymphonyElixir.Linear.Issue
   alias SymphonyElixir.Resume.{Reconciler, Store}
 
@@ -46,13 +46,6 @@ defmodule SymphonyElixir.Orchestrator do
   }
   # Slightly above the dashboard render interval so "checking now…" can render.
   @poll_transition_render_delay_ms 20
-  @empty_codex_totals %{
-    input_tokens: 0,
-    output_tokens: 0,
-    total_tokens: 0,
-    seconds_running: 0
-  }
-
   defmodule State do
     @moduledoc """
     Runtime state for the orchestrator polling loop.
@@ -74,7 +67,8 @@ defmodule SymphonyElixir.Orchestrator do
       review_rework_triggers: %{},
       resume_reconciled?: false,
       codex_totals: nil,
-      codex_rate_limits: nil
+      codex_rate_limits: nil,
+      completed_count: 0
     ]
 
     @type t :: %__MODULE__{}
@@ -98,8 +92,9 @@ defmodule SymphonyElixir.Orchestrator do
       poll_check_in_progress: false,
       tick_timer_ref: nil,
       tick_token: nil,
-      codex_totals: @empty_codex_totals,
-      codex_rate_limits: nil
+      codex_totals: ObservabilityMetrics.codex_totals(),
+      codex_rate_limits: nil,
+      completed_count: ObservabilityMetrics.completed_count()
     }
 
     state = run_boot_reconciliation(state)
@@ -1122,10 +1117,15 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp revalidate_issue_for_dispatch(issue, _issue_fetcher, _terminal_states), do: {:ok, issue}
 
-  defp complete_issue(%State{} = state, issue_id) do
+  defp complete_issue(%State{} = state, issue_id, running_entry) do
+    :ok = ObservabilityMetrics.record_completed_issue(issue_id, running_entry)
+
+    completed_count = max(MapSet.size(state.completed), ObservabilityMetrics.completed_count())
+
     %{
       state
       | completed: MapSet.put(state.completed, issue_id),
+        completed_count: completed_count,
         retry_attempts: Map.delete(state.retry_attempts, issue_id)
     }
   end
@@ -1720,6 +1720,7 @@ defmodule SymphonyElixir.Orchestrator do
        pending_slot: pending_slot,
        retrying: retrying,
        codex_totals: state.codex_totals,
+       completed_count: state.completed_count,
        rate_limits: Map.get(state, :codex_rate_limits),
        deploy_pending: DeployIntent.public_payload(DeployIntent.load()),
        polling: %{
@@ -1897,6 +1898,8 @@ defmodule SymphonyElixir.Orchestrator do
         }
       )
 
+    :ok = ObservabilityMetrics.record_session_completion(running_entry)
+
     %{state | codex_totals: codex_totals}
   end
 
@@ -1919,7 +1922,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp handle_agent_down_reason(state, issue_id, running_entry, session_id, :normal) do
     close_running_resume_state(running_entry, "completed", %{session_id: session_id})
-    state = complete_issue(state, issue_id)
+    state = complete_issue(state, issue_id, running_entry)
 
     if continuation_issue?(running_entry.issue) do
       Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling continuation-state check")
@@ -2743,6 +2746,7 @@ defmodule SymphonyElixir.Orchestrator do
        )
        when is_integer(input) and is_integer(output) and is_integer(total) do
     %{state | codex_totals: apply_token_delta(codex_totals, token_delta)}
+    |> tap(fn _state -> ObservabilityMetrics.record_token_delta(token_delta) end)
   end
 
   defp apply_codex_token_delta(state, _token_delta), do: state
@@ -2847,6 +2851,8 @@ defmodule SymphonyElixir.Orchestrator do
   defp extract_rate_limits(update) do
     rate_limits_from_payload(update[:rate_limits]) ||
       rate_limits_from_payload(Map.get(update, "rate_limits")) ||
+      rate_limits_from_payload(update[:rateLimits]) ||
+      rate_limits_from_payload(Map.get(update, "rateLimits")) ||
       rate_limits_from_payload(Map.get(update, :rate_limits)) ||
       rate_limits_from_payload(update[:payload]) ||
       rate_limits_from_payload(Map.get(update, "payload")) ||
@@ -2887,7 +2893,13 @@ defmodule SymphonyElixir.Orchestrator do
   defp turn_completed_usage_from_payload(_payload), do: nil
 
   defp rate_limits_from_payload(payload) when is_map(payload) do
-    direct = Map.get(payload, "rate_limits") || Map.get(payload, :rate_limits)
+    direct =
+      Map.get(payload, "rate_limits") ||
+        Map.get(payload, :rate_limits) ||
+        Map.get(payload, "rateLimits") ||
+        Map.get(payload, :rateLimits) ||
+        map_at_path(payload, ["params", "rateLimits"]) ||
+        map_at_path(payload, [:params, :rateLimits])
 
     cond do
       rate_limits_map?(direct) ->
@@ -2948,7 +2960,7 @@ defmodule SymphonyElixir.Orchestrator do
         &Map.has_key?(payload, &1)
       )
 
-    !is_nil(limit_id) and has_buckets
+    !is_nil(limit_id) or has_buckets
   end
 
   defp rate_limits_map?(_payload), do: false

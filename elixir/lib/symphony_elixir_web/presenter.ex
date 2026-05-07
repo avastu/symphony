@@ -17,14 +17,17 @@ defmodule SymphonyElixirWeb.Presenter do
           counts: %{
             running: length(snapshot.running),
             pending_slot: length(Map.get(snapshot, :pending_slot, [])),
-            retrying: length(snapshot.retrying)
+            retrying: length(snapshot.retrying),
+            completed: Map.get(snapshot, :completed_count, 0)
           },
           running: Enum.map(snapshot.running, &running_entry_payload/1),
           pending_slot: Enum.map(Map.get(snapshot, :pending_slot, []), &pending_slot_entry_payload/1),
           retrying: Enum.map(snapshot.retrying, &retry_entry_payload/1),
           managed_projects: managed_project_payloads(),
           codex_totals: snapshot.codex_totals,
+          completed_count: Map.get(snapshot, :completed_count, 0),
           rate_limits: snapshot.rate_limits,
+          rate_limit_summary: rate_limit_summary(snapshot.rate_limits),
           deploy_pending: Map.get(snapshot, :deploy_pending),
           runtime_health: runtime_health_payload()
         }
@@ -302,4 +305,100 @@ defmodule SymphonyElixirWeb.Presenter do
   end
 
   defp iso8601(_datetime), do: nil
+
+  defp rate_limit_summary(rate_limits) when is_map(rate_limits) do
+    buckets =
+      [
+        bucket_summary(:primary, map_value(rate_limits, ["primary", :primary])),
+        bucket_summary(:secondary, map_value(rate_limits, ["secondary", :secondary]))
+      ]
+      |> Enum.reject(&is_nil/1)
+
+    session = Enum.find(buckets, &(&1.kind == :session)) || Enum.find(buckets, &(&1.source == :primary))
+    weekly = Enum.find(buckets, &(&1.kind == :weekly)) || Enum.find(buckets, &(&1.source == :secondary))
+
+    %{
+      session_remaining_percent: session && session.remaining_percent,
+      weekly_remaining_percent: weekly && weekly.remaining_percent,
+      session_reset: session && session.reset,
+      weekly_reset: weekly && weekly.reset
+    }
+  end
+
+  defp rate_limit_summary(_rate_limits) do
+    %{
+      session_remaining_percent: nil,
+      weekly_remaining_percent: nil,
+      session_reset: nil,
+      weekly_reset: nil
+    }
+  end
+
+  defp bucket_summary(source, bucket) when is_map(bucket) do
+    window_mins = map_value(bucket, ["windowDurationMins", :windowDurationMins, "window_duration_mins", :window_duration_mins])
+
+    %{
+      source: source,
+      kind: rate_limit_kind(source, bucket, window_mins),
+      remaining_percent: remaining_percent(bucket),
+      reset: map_value(bucket, ["resetAt", :resetAt, "reset_at", :reset_at, "resetsAt", :resetsAt, "resets_at", :resets_at])
+    }
+  end
+
+  defp bucket_summary(_source, _bucket), do: nil
+
+  defp rate_limit_kind(_source, bucket, window_mins) do
+    name =
+      bucket
+      |> map_value(["name", :name, "limit_id", :limit_id, "limit_name", :limit_name])
+      |> to_string()
+      |> String.downcase()
+
+    cond do
+      String.contains?(name, "week") -> :weekly
+      is_number(window_mins) and window_mins >= 7 * 24 * 60 -> :weekly
+      true -> :session
+    end
+  end
+
+  defp remaining_percent(bucket) when is_map(bucket) do
+    used_percent = number_value(map_value(bucket, ["usedPercent", :usedPercent, "used_percent", :used_percent]))
+    remaining_percent = number_value(map_value(bucket, ["remainingPercent", :remainingPercent, "remaining_percent", :remaining_percent]))
+    remaining = number_value(map_value(bucket, ["remaining", :remaining]))
+    limit = number_value(map_value(bucket, ["limit", :limit]))
+
+    cond do
+      is_number(remaining_percent) ->
+        clamp_percent(remaining_percent)
+
+      is_number(used_percent) ->
+        clamp_percent(100 - used_percent)
+
+      is_number(remaining) and is_number(limit) and limit > 0 ->
+        clamp_percent(remaining / limit * 100)
+
+      true ->
+        nil
+    end
+  end
+
+  defp map_value(map, keys) when is_map(map) and is_list(keys) do
+    Enum.find_value(keys, fn key -> Map.get(map, key) end)
+  end
+
+  defp map_value(_map, _keys), do: nil
+
+  defp number_value(value) when is_number(value), do: value
+
+  defp number_value(value) when is_binary(value) do
+    case Float.parse(String.trim(value)) do
+      {number, _rest} -> number
+      :error -> nil
+    end
+  end
+
+  defp number_value(_value), do: nil
+
+  defp clamp_percent(value) when is_number(value), do: value |> max(0) |> min(100)
+  defp clamp_percent(_value), do: nil
 end

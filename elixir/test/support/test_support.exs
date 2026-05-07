@@ -35,8 +35,10 @@ defmodule SymphonyElixir.TestSupport do
 
         File.mkdir_p!(workflow_root)
         workflow_file = Path.join(workflow_root, "WORKFLOW.md")
+        observability_metrics_file = Path.join(workflow_root, "observability-metrics.json")
         write_workflow_file!(workflow_file, resume_state_dir: Path.join(workflow_root, "resume"))
         Workflow.set_workflow_file_path(workflow_file)
+        Application.put_env(:symphony_elixir, :observability_metrics_file, observability_metrics_file)
         if Process.whereis(SymphonyElixir.WorkflowStore), do: SymphonyElixir.WorkflowStore.force_reload()
         stop_default_http_server()
 
@@ -44,6 +46,7 @@ defmodule SymphonyElixir.TestSupport do
           Application.delete_env(:symphony_elixir, :workflow_file_path)
           Application.delete_env(:symphony_elixir, :deploy_command_runner)
           Application.delete_env(:symphony_elixir, :deploy_intent_file)
+          Application.delete_env(:symphony_elixir, :observability_metrics_file)
           Application.delete_env(:symphony_elixir, :server_port_override)
           Application.delete_env(:symphony_elixir, :memory_tracker_issues)
           Application.delete_env(:symphony_elixir, :memory_tracker_recipient)
