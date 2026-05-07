@@ -9,6 +9,11 @@ defmodule SymphonyElixir.Linear.Client do
 
   @issue_page_size 50
   @max_error_body_log_bytes 1_000
+  @generated_review_comment_headers [
+    "## Codex Workpad",
+    "## Symphony Uploaded Artifacts",
+    "## Symphony Review Loop Guard"
+  ]
 
   @issue_fields """
         id
@@ -686,17 +691,9 @@ defmodule SymphonyElixir.Linear.Client do
 
   defp latest_workpad_field(_issue, _field_name), do: nil
 
-  defp latest_workpad_body(%{"comments" => %{"nodes" => comments}}) when is_list(comments) do
-    comments
-    |> Enum.filter(fn comment ->
-      comment
-      |> Map.get("body", "")
-      |> to_string()
-      |> String.trim_leading()
-      |> String.starts_with?("## Codex Workpad")
-    end)
-    |> Enum.sort_by(&comment_updated_at_sort_key/1, :desc)
-    |> List.first()
+  defp latest_workpad_body(%{"comments" => %{"nodes" => _comments}} = issue) do
+    issue
+    |> latest_workpad_comment()
     |> case do
       %{"body" => body} when is_binary(body) -> body
       _ -> nil
@@ -705,9 +702,21 @@ defmodule SymphonyElixir.Linear.Client do
 
   defp latest_workpad_body(_issue), do: nil
 
-  defp latest_review_action(%{"comments" => %{"nodes" => comments}}) when is_list(comments) do
+  defp latest_workpad_comment(%{"comments" => %{"nodes" => comments}}) when is_list(comments) do
     comments
-    |> Enum.reject(&workpad_comment?/1)
+    |> Enum.filter(&workpad_comment?/1)
+    |> Enum.sort_by(&comment_updated_at_sort_key/1, :desc)
+    |> List.first()
+  end
+
+  defp latest_workpad_comment(_issue), do: nil
+
+  defp latest_review_action(%{"comments" => %{"nodes" => comments}} = issue) when is_list(comments) do
+    review_floor = review_comment_floor_sort_key(issue)
+
+    comments
+    |> Enum.reject(&generated_review_comment?/1)
+    |> Enum.filter(&review_comment_after_floor?(&1, review_floor))
     |> Enum.sort_by(&comment_updated_at_sort_key/1, :desc)
     |> Enum.find_value(fn comment ->
       case review_action_event(comment) do
@@ -719,9 +728,12 @@ defmodule SymphonyElixir.Linear.Client do
 
   defp latest_review_action(_issue), do: nil
 
-  defp review_events(%{"comments" => %{"nodes" => comments}}) when is_list(comments) do
+  defp review_events(%{"comments" => %{"nodes" => comments}} = issue) when is_list(comments) do
+    review_floor = review_comment_floor_sort_key(issue)
+
     comments
-    |> Enum.reject(&workpad_comment?/1)
+    |> Enum.reject(&generated_review_comment?/1)
+    |> Enum.filter(&review_comment_after_floor?(&1, review_floor))
     |> Enum.sort_by(&comment_updated_at_sort_key/1, :desc)
     |> Enum.flat_map(&comment_review_events/1)
     |> Enum.uniq_by(&Map.get(&1, :id))
@@ -735,6 +747,35 @@ defmodule SymphonyElixir.Linear.Client do
     |> to_string()
     |> String.trim_leading()
     |> String.starts_with?("## Codex Workpad")
+  end
+
+  defp generated_review_comment?(comment) when is_map(comment) do
+    body = comment_body_prefix(comment)
+    Enum.any?(@generated_review_comment_headers, &String.starts_with?(body, &1))
+  end
+
+  defp generated_review_comment?(_comment), do: false
+
+  defp comment_body_prefix(comment) when is_map(comment) do
+    comment
+    |> Map.get("body", "")
+    |> to_string()
+    |> String.trim_leading()
+  end
+
+  defp review_comment_floor_sort_key(issue) when is_map(issue) do
+    issue
+    |> latest_workpad_comment()
+    |> case do
+      %{} = comment -> comment_updated_at_sort_key(comment)
+      _ -> 0
+    end
+  end
+
+  defp review_comment_after_floor?(_comment, 0), do: true
+
+  defp review_comment_after_floor?(comment, review_floor) when is_integer(review_floor) do
+    comment_updated_at_sort_key(comment) > review_floor
   end
 
   defp comment_review_events(%{} = comment) do
