@@ -13,6 +13,36 @@ defmodule SymphonyElixir.Orchestrator do
   @continuation_retry_delay_ms 1_000
   @failure_retry_base_ms 10_000
   @review_loop_guard_window_ms 10 * 60 * 1_000
+  @review_event_key_aliases %{
+    "id" => :id,
+    "kind" => :kind,
+    "type" => :type,
+    "source" => :source,
+    "value" => :value,
+    "sha" => :sha,
+    "annotation_id" => :annotation_id,
+    "annotationId" => :annotation_id,
+    "check_run_id" => :check_run_id,
+    "checkRunId" => :check_run_id,
+    "comment_id" => :comment_id,
+    "commentId" => :comment_id,
+    "actionable" => :actionable,
+    "resolved" => :resolved,
+    "outdated" => :outdated,
+    "blocked" => :blocked,
+    "requires_human" => :requires_human,
+    "requiresHuman" => :requires_human,
+    "infrastructure_failure" => :infrastructure_failure,
+    "infrastructureFailure" => :infrastructure_failure,
+    "conclusion" => :conclusion,
+    "status" => :status
+  }
+  @review_event_id_sources %{
+    "pr_head" => {:sha, "pr_head"},
+    "check_annotation" => {:annotation_id, "check_annotation"},
+    "check_failure" => {:check_run_id, "check_failure"},
+    "human_change_request" => {:comment_id, "human_change_request"}
+  }
   # Slightly above the dashboard render interval so "checking now…" can render.
   @poll_transition_render_delay_ms 20
   @empty_codex_totals %{
@@ -1930,7 +1960,7 @@ defmodule SymphonyElixir.Orchestrator do
       current_ids = checkpoint_actionable_event_ids(checkpoint)
 
       current_ids
-      |> Enum.reject(&MapSet.member?(previous_ids, &1))
+      |> Enum.reject(&(&1 in previous_ids))
       |> List.first()
       |> case do
         nil -> nil
@@ -2010,31 +2040,8 @@ defmodule SymphonyElixir.Orchestrator do
   defp normalize_event_key(key) when is_atom(key), do: key
 
   defp normalize_event_key(key) when is_binary(key) do
-    case String.trim(key) do
-      "id" -> :id
-      "kind" -> :kind
-      "type" -> :type
-      "source" -> :source
-      "value" -> :value
-      "sha" -> :sha
-      "annotation_id" -> :annotation_id
-      "annotationId" -> :annotation_id
-      "check_run_id" -> :check_run_id
-      "checkRunId" -> :check_run_id
-      "comment_id" -> :comment_id
-      "commentId" -> :comment_id
-      "actionable" -> :actionable
-      "resolved" -> :resolved
-      "outdated" -> :outdated
-      "blocked" -> :blocked
-      "requires_human" -> :requires_human
-      "requiresHuman" -> :requires_human
-      "infrastructure_failure" -> :infrastructure_failure
-      "infrastructureFailure" -> :infrastructure_failure
-      "conclusion" -> :conclusion
-      "status" -> :status
-      other -> other
-    end
+    key = String.trim(key)
+    Map.get(@review_event_key_aliases, key, key)
   end
 
   defp normalize_event_key(key), do: key
@@ -2050,26 +2057,23 @@ defmodule SymphonyElixir.Orchestrator do
   defp normalize_review_event_kind(_value), do: nil
 
   defp normalize_review_event_id(event, kind) do
-    cond do
-      is_binary(event[:id]) ->
-        event[:id]
+    case event[:id] do
+      id when is_binary(id) ->
+        id
 
-      kind == "pr_head" and is_binary(event[:sha]) ->
-        "pr_head:#{event[:sha]}"
-
-      kind == "check_annotation" and is_binary(event[:annotation_id]) ->
-        "check_annotation:#{event[:annotation_id]}"
-
-      kind == "check_failure" and is_binary(event[:check_run_id]) ->
-        "check_failure:#{event[:check_run_id]}"
-
-      kind == "human_change_request" and is_binary(event[:comment_id]) ->
-        "human_change_request:#{event[:comment_id]}"
-
-      true ->
-        nil
+      _ ->
+        normalize_review_event_id_from_source(event, Map.get(@review_event_id_sources, kind))
     end
   end
+
+  defp normalize_review_event_id_from_source(event, {field, prefix}) do
+    case event[field] do
+      value when is_binary(value) -> "#{prefix}:#{value}"
+      _ -> nil
+    end
+  end
+
+  defp normalize_review_event_id_from_source(_event, _source), do: nil
 
   defp normalize_event_value(event) do
     event[:value] || event[:sha] || event[:annotation_id] || event[:check_run_id] || event[:comment_id]
@@ -2123,12 +2127,13 @@ defmodule SymphonyElixir.Orchestrator do
     |> Enum.map(& &1.id)
   end
 
+  @spec checkpoint_actionable_event_ids(map()) :: [String.t()]
   defp checkpoint_actionable_event_ids(checkpoint) do
     checkpoint
     |> get_in([:review_baseline, :actionable_event_ids])
     |> case do
-      ids when is_list(ids) -> MapSet.new(ids)
-      _ -> MapSet.new()
+      ids when is_list(ids) -> ids
+      _ -> []
     end
   end
 
