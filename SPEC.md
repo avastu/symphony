@@ -1227,8 +1227,11 @@ Symphony does not require first-class tracker write APIs in the orchestrator.
 - Review-check wakeups compare semantic actionable event IDs instead of raw
   issue metadata. Supported trigger dimensions include PR head/checkpoint IDs,
   unresolved actionable review-thread IDs, relevant check annotation/failure
-  IDs, and latest human change-request comment IDs. Routine `updatedAt`,
-  workpad timestamp, branch, and URL changes are not sufficient by themselves.
+  IDs, and latest human change-request comment IDs after the current workpad
+  handoff. Older Linear command comments from before the latest `## Codex
+  Workpad` update are stale for the new review packet, and generated Symphony
+  comments are not review feedback sources. Routine `updatedAt`, workpad
+  timestamp, branch, and URL changes are not sufficient by themselves.
 - Automatic `Rework` transitions MUST include the concrete trigger kind and ID
   in the returned reason. Rapid repeat transitions for the same trigger inside
   the loop-guard window MUST stop dispatch and surface a human decision item.
@@ -2019,8 +2022,9 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
   new actionable review event ID.
 - Targeted `Human Review` checks suppress non-actionable noise: outdated or
   resolved review comments, reviewer infrastructure failures without code
-  feedback, publish-path/human-action blockers, and routine Linear/workpad
-  timestamp changes.
+  feedback, generated Symphony comments, publish-path/human-action blockers,
+  stale pre-handoff Linear commands, and routine Linear/workpad timestamp
+  changes.
 - Targeted `Human Review` checks apply a loop guard for rapid repeated rework
   attempts with the same trigger ID and create a human decision item instead of
   dispatching another worker.

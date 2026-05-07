@@ -426,6 +426,90 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     refute %{id: "check_annotation:ann-7", kind: "check_annotation", source: "linear_comment", actionable: true} in issue.review_events
   end
 
+  test "linear client ignores stale review commands from before latest workpad handoff" do
+    raw_issue = %{
+      "id" => "issue-153",
+      "identifier" => "UTS-153",
+      "title" => "Ready after rework",
+      "state" => %{"name" => "Human Review"},
+      "comments" => %{
+        "nodes" => [
+          %{
+            "id" => "comment-plan-workpad",
+            "body" => "## Codex Workpad\n\nState: waiting_for_human\nDecision Needed: approve the plan\n",
+            "createdAt" => "2026-05-07T05:15:00Z",
+            "updatedAt" => "2026-05-07T05:15:00Z"
+          },
+          %{
+            "id" => "comment-plan-approval",
+            "body" => "Approved with change: proceed with the implementation plan.",
+            "createdAt" => "2026-05-07T05:22:28Z",
+            "updatedAt" => "2026-05-07T05:22:28Z"
+          },
+          %{
+            "id" => "comment-artifacts",
+            "body" => "## Symphony Uploaded Artifacts\n\nSymphony Review Event: review_thread:stale-artifact",
+            "createdAt" => "2026-05-07T05:58:55Z",
+            "updatedAt" => "2026-05-07T05:58:55Z"
+          },
+          %{
+            "id" => "comment-final-workpad",
+            "body" => "## Codex Workpad\n\nState: ready_for_review\nPhase: final_review\nDecision Needed: review draft PR #25; recommended response `Approved` or `Approved with change: ...`\n",
+            "createdAt" => "2026-05-07T05:15:24Z",
+            "updatedAt" => "2026-05-07T06:02:23Z"
+          },
+          %{
+            "id" => "comment-final-packet",
+            "body" => "UTS-153 is ready for high-tier human review.\n\nRecommended response: `Approved` to proceed toward merge, or `Approved with change: ...` for scoped rework.",
+            "createdAt" => "2026-05-07T06:02:34Z",
+            "updatedAt" => "2026-05-07T06:02:34Z"
+          }
+        ]
+      },
+      "createdAt" => "2026-05-07T04:07:17Z",
+      "updatedAt" => "2026-05-07T06:05:55Z"
+    }
+
+    issue = Client.normalize_issue_for_test(raw_issue)
+
+    assert issue.workpad_state == "ready_for_review"
+    assert issue.review_action == nil
+    refute Enum.any?(issue.review_events, &(&1.id == "rework:comment-plan-approval"))
+    refute Enum.any?(issue.review_events, &(&1.id == "review_thread:stale-artifact"))
+  end
+
+  test "linear client keeps new review commands after latest workpad handoff" do
+    raw_issue = %{
+      "id" => "issue-154",
+      "identifier" => "UTS-154",
+      "title" => "Fresh final review",
+      "state" => %{"name" => "Human Review"},
+      "comments" => %{
+        "nodes" => [
+          %{
+            "id" => "comment-final-workpad",
+            "body" => "## Codex Workpad\n\nState: ready_for_review\nPhase: final_review\n",
+            "createdAt" => "2026-05-07T06:00:00Z",
+            "updatedAt" => "2026-05-07T06:00:00Z"
+          },
+          %{
+            "id" => "comment-final-change",
+            "body" => "Approved with change: add one more guard test.",
+            "createdAt" => "2026-05-07T06:05:00Z",
+            "updatedAt" => "2026-05-07T06:05:00Z"
+          }
+        ]
+      },
+      "createdAt" => "2026-05-07T04:07:17Z",
+      "updatedAt" => "2026-05-07T06:05:55Z"
+    }
+
+    issue = Client.normalize_issue_for_test(raw_issue)
+
+    assert issue.review_action == "rework:comment-final-change"
+    assert %{id: "rework:comment-final-change", kind: "human_change_request", source: "linear_comment", actionable: true} in issue.review_events
+  end
+
   test "linear client marks explicitly unassigned issues as not routed to worker" do
     raw_issue = %{
       "id" => "issue-99",
