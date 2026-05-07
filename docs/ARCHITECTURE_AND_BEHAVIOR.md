@@ -34,6 +34,44 @@ Workspace cleanup is not a crash-recovery mechanism. Dirty or existing
 workspaces are preserved; resume packets and checkpoints describe the workspace
 state so a later worker or human can continue in place.
 
+## Self-Redeploy Health Gate
+
+Deploy-pending intent is the dispatch boundary for automatic self-redeploy.
+While intent status is `pending`, `draining`, `deploying`, or `failed`, normal
+dispatch and targeted review dispatch stay closed. The automatic path launches
+redeploy only after all running and retrying counts are zero.
+
+The shared `DeployIntent` state includes target, requested revision,
+requested_by, status, running/retrying counts, failure_count, blocker,
+health_check, rollback_packet, deploy_started_at, completed_at, and
+last_attempt_at. Public dashboard/API payloads expose sanitized metadata only.
+Raw prompts, provider transcripts, request bodies, `.env` contents,
+secret-like values, private payloads, and untrusted markdown/control text must
+be redacted before they become blocker, health, rollback, dashboard, or handoff
+evidence.
+
+`/api/v1/state` includes a `runtime_health` block used by the control-side
+health gate. It reports process identity, runtime app/repo paths, runtime git
+commit, control dir and commit, workflow path, deploy intent path, resume state
+directory, and a read/write resume-state access probe. Control scripts must
+verify these fields together with managed projects and queue counts; process
+liveness alone is never sufficient health evidence.
+
+Automatic redeploy scripts are single-flight. Before any merge, build, restart,
+or other live-service mutation, the script re-reads the deploy intent and live
+runtime state under the redeploy lock. It fails closed unless target matches,
+status is `deploying`, requested revision matches the fetched target `main`,
+intent counts are zero, and live counts are zero when the runtime is reachable.
+Canceled, done, resolved, changed, repeated-failure, or concurrent attempts
+remain visible instead of being reopened by late scripts.
+
+The redeploy flow writes a rollback packet before mutation and writes a health
+snapshot after restart. It marks intent `done` only after build/merge/restart,
+health, rollback evidence, handoff refresh, and control-room recording have
+succeeded. Any dirty checkout, build failure, merge conflict, health failure,
+repeated failure, or rollback ambiguity keeps deploy-pending failed/visible
+with an exact sanitized blocker.
+
 ## Review/Rework Boundary
 
 `Human Review` is a durable wait boundary. The normal worker path may return an issue from `Rework` to `Human Review`; that return establishes a fresh semantic review baseline and must not be treated as a new request for product rework.

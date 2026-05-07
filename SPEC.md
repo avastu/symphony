@@ -855,6 +855,49 @@ When the service starts:
 
 Startup reconciliation MUST preserve workspaces and dirty changes.
 
+### 8.7 Deploy Intent And Self-Redeploy Gate
+
+Deploy intent is a file-backed dispatch gate shared by the runtime and control
+scripts. While status is `pending`, `draining`, `deploying`, or `failed`, the
+runtime MUST suppress normal dispatch, retry dispatch, targeted review dispatch,
+and boot relaunch.
+
+The deploy intent payload SHOULD include:
+
+- `target`
+- `requested_revision`
+- `requested_branch`
+- `requested_by`
+- `status`
+- `running_count`
+- `retrying_count`
+- `failure_count`
+- `blocker`
+- `health_check`
+- `rollback_packet`
+- `deploy_started_at`
+- `completed_at`
+- `last_attempt_at`
+
+Automatic redeploy MUST NOT use the manual `--allow-active` override. Before
+merge, build, restart, or other live-service mutation, the control script MUST
+hold a single-flight redeploy lock and re-read both deploy intent and live
+runtime state. It MUST fail closed unless the target matches, status is
+`deploying`, requested revision matches fetched target `main`, persisted counts
+are zero, and live counts are zero when reachable.
+
+Runtime `/api/v1/state` MUST expose sanitized `runtime_health` metadata for the
+control health gate: process identity, runtime path, runtime commit, control
+path/commit, workflow path, deploy-intent path, resume state directory, and
+resume state read/write access. Control health checks MUST also verify managed
+projects and queue state; process liveness alone is insufficient.
+
+Automatic redeploy completion requires rollback evidence, health evidence,
+operator handoff/control-room evidence, and a green health check. Failed,
+canceled, resolved, changed, repeated-failure, or concurrent attempts MUST
+remain visible and MUST NOT reopen dispatch until an operator cancels/resolves
+the intent or a fresh green deploy completes.
+
 ## 9. Workspace Management and Safety
 
 ### 9.1 Workspace Layout
