@@ -990,6 +990,7 @@ defmodule SymphonyElixir.CoreTest do
       assert first_payload.reason == "review_checkpoint_unchanged"
       refute MapSet.member?(first_state.claimed, "issue-uts-42")
       assert first_state.review_checkpoints["issue-uts-42"].state == "Human Review"
+      assert first_state.review_checkpoints["issue-uts-42"].review_baseline.actionable_event_ids == []
 
       assert {:reply, second_payload, second_state} =
                Orchestrator.handle_call({:request_review_check, "issue-uts-42"}, {self(), make_ref()}, first_state)
@@ -1012,6 +1013,7 @@ defmodule SymphonyElixir.CoreTest do
       identifier: "UTS-43",
       title: "PR with review feedback",
       state: "Human Review",
+      review_events: [%{id: "review_thread:thread-43", kind: "review_thread"}],
       updated_at: ~U[2026-04-29 21:00:00Z],
       branch_name: "uts-43-feedback",
       url: "https://linear.app/issue/UTS-43"
@@ -1048,8 +1050,9 @@ defmodule SymphonyElixir.CoreTest do
                Orchestrator.handle_call({:request_review_check, "issue-uts-43"}, {self(), make_ref()}, state)
 
       assert payload.queued == true
-      assert payload.reason == "review_checkpoint_changed_rework"
-      assert payload.operations == ["review_check", "state:Rework", "dispatch"]
+      assert payload.reason == "review_trigger_rework:review_thread:review_thread:thread-43"
+      assert payload.review_trigger_id == "review_thread:thread-43"
+      assert payload.operations == ["review_check", "state:Rework", "dispatch", "trigger:review_thread:thread-43"]
       assert_receive {:memory_tracker_state_update, "issue-uts-43", "Rework"}
       assert MapSet.member?(updated_state.claimed, "issue-uts-43")
       assert updated_state.review_checkpoints["issue-uts-43"].state == "Rework"
@@ -1109,11 +1112,27 @@ defmodule SymphonyElixir.CoreTest do
 
       second_state = %{first_state | claimed: MapSet.new(["issue-uts-110"])}
 
-      assert {:reply, second_payload, updated_state} =
+      assert {:reply, second_payload, second_updated_state} =
                Orchestrator.handle_call({:request_review_check, "issue-uts-110"}, {self(), make_ref()}, second_state)
 
-      assert second_payload.queued == true
-      assert second_payload.reason == "review_checkpoint_changed_rework"
+      assert second_payload.queued == false
+      assert second_payload.reason == "review_checkpoint_unchanged"
+      refute_receive {:memory_tracker_state_update, "issue-uts-110", "Rework"}, 50
+
+      feedback_issue = %{
+        changed_issue
+        | review_events: [%{id: "review_thread:thread-110b", kind: "review_thread"}],
+          updated_at: ~U[2026-05-06 21:20:00Z]
+      }
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [feedback_issue])
+      third_state = %{second_updated_state | claimed: MapSet.new(["issue-uts-110"])}
+
+      assert {:reply, third_payload, updated_state} =
+               Orchestrator.handle_call({:request_review_check, "issue-uts-110"}, {self(), make_ref()}, third_state)
+
+      assert third_payload.queued == true
+      assert third_payload.reason == "review_trigger_rework:review_thread:review_thread:thread-110b"
       assert_receive {:memory_tracker_state_update, "issue-uts-110", "Rework"}
       assert updated_state.review_checkpoints["issue-uts-110"].state == "Rework"
     after
@@ -1324,8 +1343,15 @@ defmodule SymphonyElixir.CoreTest do
                Orchestrator.handle_call({:request_review_check, "issue-uts-129"}, {self(), make_ref()}, state)
 
       assert payload.queued == true
-      assert payload.reason == "review_checkpoint_changed_rework"
-      assert payload.operations == ["review_check", "state:Rework", "dispatch"]
+      assert payload.reason == "review_trigger_rework:human_change_request:rework:1778109517000000"
+
+      assert payload.operations == [
+               "review_check",
+               "state:Rework",
+               "dispatch",
+               "trigger:rework:1778109517000000"
+             ]
+
       assert_receive {:memory_tracker_state_update, "issue-uts-129", "Rework"}
       assert MapSet.member?(updated_state.claimed, "issue-uts-129")
       assert updated_state.review_checkpoints["issue-uts-129"].state == "Rework"

@@ -381,19 +381,28 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       "comments" => %{
         "nodes" => [
           %{
+            "id" => "comment-workpad",
             "body" => "## Codex Workpad\n\nState: ready_for_review\nPhase: final_review\n",
             "createdAt" => "2026-05-06T22:00:00Z",
             "updatedAt" => "2026-05-06T22:00:00Z"
           },
           %{
+            "id" => "comment-status",
             "body" => "UTS-128 is back to high-risk human review after addressing feedback.",
             "createdAt" => "2026-05-06T23:18:37Z",
             "updatedAt" => "2026-05-06T23:18:37Z"
           },
           %{
+            "id" => "comment-revise",
             "body" => "Revise plan: tighten the replay protection test.",
             "createdAt" => "2026-05-06T23:20:00Z",
             "updatedAt" => "2026-05-06T23:20:00Z"
+          },
+          %{
+            "id" => "comment-check",
+            "body" => "Symphony Review Event: check_annotation:ann-7",
+            "createdAt" => "2026-05-06T23:21:00Z",
+            "updatedAt" => "2026-05-06T23:21:00Z"
           }
         ]
       },
@@ -404,7 +413,10 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     issue = Client.normalize_issue_for_test(raw_issue)
 
     assert issue.workpad_state == "ready_for_review"
-    assert issue.review_action == "rework:1778109600000000"
+    assert issue.review_action == "rework:comment-revise"
+
+    assert %{id: "rework:comment-revise", kind: "human_change_request", source: "linear_comment", actionable: true} in issue.review_events
+    assert %{id: "check_annotation:ann-7", kind: "check_annotation", source: "linear_comment", actionable: true} in issue.review_events
   end
 
   test "linear client marks explicitly unassigned issues as not routed to worker" do

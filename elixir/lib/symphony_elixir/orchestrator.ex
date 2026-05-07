@@ -12,6 +12,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   @continuation_retry_delay_ms 1_000
   @failure_retry_base_ms 10_000
+  @review_loop_guard_window_ms 10 * 60 * 1_000
   # Slightly above the dashboard render interval so "checking now…" can render.
   @poll_transition_render_delay_ms 20
   @empty_codex_totals %{
@@ -39,6 +40,7 @@ defmodule SymphonyElixir.Orchestrator do
       pending_slot_issues: [],
       retry_attempts: %{},
       review_checkpoints: %{},
+      review_rework_triggers: %{},
       codex_totals: nil,
       codex_rate_limits: nil
     ]
@@ -1713,8 +1715,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp handle_review_check_issue(%State{} = state, %Issue{id: issue_id} = issue) do
     checkpoint = review_checkpoint(issue)
     previous_checkpoint = Map.get(state.review_checkpoints, issue_id)
-    changed? = review_checkpoint_changed?(previous_checkpoint, checkpoint)
-    actionable_review? = review_action_changed?(previous_checkpoint, checkpoint)
+    review_trigger = review_trigger_change(previous_checkpoint, checkpoint)
 
     state = %{state | review_checkpoints: Map.put(state.review_checkpoints, issue_id, checkpoint)}
     terminal_states = terminal_state_set()
@@ -1747,7 +1748,7 @@ defmodule SymphonyElixir.Orchestrator do
         }
 
       human_review_state?(issue.state) ->
-        handle_human_review_check_issue(state, issue, changed?, actionable_review?)
+        handle_human_review_check_issue(state, issue, review_trigger)
 
       true ->
         {
@@ -1764,10 +1765,10 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp handle_human_review_check_issue(%State{} = state, %Issue{id: issue_id} = issue, changed?, actionable_review?) do
+  defp handle_human_review_check_issue(%State{} = state, %Issue{id: issue_id} = issue, review_trigger) do
     cond do
-      actionable_review? ->
-        transition_review_issue_to_rework(state, issue)
+      review_trigger != nil ->
+        transition_review_issue_to_rework(state, issue, review_trigger)
 
       workpad_publish_blocked?(issue) ->
         {
@@ -1808,9 +1809,6 @@ defmodule SymphonyElixir.Orchestrator do
           release_issue_claim(state, issue_id)
         }
 
-      changed? ->
-        transition_review_issue_to_rework(state, issue)
-
       true ->
         {
           %{
@@ -1826,12 +1824,46 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp transition_review_issue_to_rework(%State{} = state, %Issue{id: issue_id} = issue)
+  defp transition_review_issue_to_rework(%State{} = state, %Issue{id: issue_id} = issue, review_trigger)
        when is_binary(issue_id) do
+    trigger_id = review_trigger_id(review_trigger)
+
+    if review_loop_guarded?(state, issue_id, trigger_id) do
+      handle_review_loop_guard(state, issue, review_trigger)
+    else
+      do_transition_review_issue_to_rework(state, issue, review_trigger)
+    end
+  end
+
+  defp transition_review_issue_to_rework(%State{} = state, %Issue{} = issue, _review_trigger) do
+    {
+      %{
+        queued: false,
+        coalesced: false,
+        issue_id: issue.id,
+        issue_identifier: issue.identifier,
+        reason: "missing_issue_id",
+        operations: ["review_check"]
+      },
+      state
+    }
+  end
+
+  defp do_transition_review_issue_to_rework(%State{} = state, %Issue{id: issue_id} = issue, review_trigger) do
     case Tracker.update_issue_state(issue_id, "Rework") do
       :ok ->
         rework_issue = %{issue | state: "Rework"}
-        state = %{state | review_checkpoints: Map.put(state.review_checkpoints, issue_id, review_checkpoint(rework_issue))}
+        trigger_id = review_trigger_id(review_trigger)
+
+        state = %{
+          state
+          | review_checkpoints: Map.put(state.review_checkpoints, issue_id, review_checkpoint(rework_issue)),
+            review_rework_triggers:
+              Map.put(state.review_rework_triggers, issue_id, %{
+                trigger_id: trigger_id,
+                triggered_at_ms: System.monotonic_time(:millisecond)
+              })
+        }
 
         if dispatch_slots_available?(rework_issue, state) do
           {
@@ -1840,8 +1872,10 @@ defmodule SymphonyElixir.Orchestrator do
               coalesced: false,
               issue_id: issue_id,
               issue_identifier: issue.identifier,
-              reason: "review_checkpoint_changed_rework",
-              operations: ["review_check", "state:Rework", "dispatch"]
+              reason: review_trigger_reason(review_trigger, "review_trigger_rework"),
+              review_trigger_id: trigger_id,
+              review_trigger_kind: review_trigger_kind(review_trigger),
+              operations: ["review_check", "state:Rework", "dispatch", "trigger:#{trigger_id}"]
             },
             do_dispatch_issue(state, rework_issue, %{delay_type: :review_check}, nil)
           }
@@ -1852,8 +1886,10 @@ defmodule SymphonyElixir.Orchestrator do
               coalesced: false,
               issue_id: issue_id,
               issue_identifier: issue.identifier,
-              reason: "review_checkpoint_changed_rework_no_capacity",
-              operations: ["review_check", "state:Rework"]
+              reason: review_trigger_reason(review_trigger, "review_trigger_rework_no_capacity"),
+              review_trigger_id: trigger_id,
+              review_trigger_kind: review_trigger_kind(review_trigger),
+              operations: ["review_check", "state:Rework", "trigger:#{trigger_id}"]
             },
             release_issue_claim(state, issue_id)
           }
@@ -1876,54 +1912,293 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp transition_review_issue_to_rework(%State{} = state, %Issue{} = issue) do
-    {
-      %{
-        queued: false,
-        coalesced: false,
-        issue_id: issue.id,
-        issue_identifier: issue.identifier,
-        reason: "missing_issue_id",
-        operations: ["review_check"]
-      },
-      state
-    }
-  end
-
   defp review_checkpoint(%Issue{} = issue) do
     %{
       state: issue.state,
       workpad_state: issue.workpad_state,
-      review_action: issue.review_action,
-      updated_at: issue.updated_at,
-      branch_name: issue.branch_name,
-      url: issue.url
+      review_baseline: semantic_review_baseline(issue)
     }
   end
 
-  defp review_checkpoint_changed?(nil, _checkpoint), do: false
-
-  defp review_checkpoint_changed?(previous_checkpoint, checkpoint)
+  defp review_trigger_change(previous_checkpoint, checkpoint)
        when is_map(previous_checkpoint) and is_map(checkpoint) do
     previous_state = Map.get(previous_checkpoint, :state)
     current_state = Map.get(checkpoint, :state)
 
-    human_review_state?(previous_state) and human_review_state?(current_state) and
-      Map.drop(previous_checkpoint, [:state]) != Map.drop(checkpoint, [:state])
+    if human_review_state?(previous_state) and human_review_state?(current_state) do
+      previous_ids = checkpoint_actionable_event_ids(previous_checkpoint)
+      current_ids = checkpoint_actionable_event_ids(checkpoint)
+
+      current_ids
+      |> Enum.reject(&MapSet.member?(previous_ids, &1))
+      |> List.first()
+      |> case do
+        nil -> nil
+        event_id -> review_event_by_id(checkpoint, event_id)
+      end
+    end
   end
 
-  defp review_action_changed?(previous_checkpoint, checkpoint)
-       when is_map(previous_checkpoint) and is_map(checkpoint) do
-    previous_state = Map.get(previous_checkpoint, :state)
-    current_state = Map.get(checkpoint, :state)
-    previous_action = Map.get(previous_checkpoint, :review_action)
-    current_action = Map.get(checkpoint, :review_action)
+  defp review_trigger_change(_previous_checkpoint, _checkpoint), do: nil
 
-    human_review_state?(previous_state) and human_review_state?(current_state) and
-      is_binary(current_action) and current_action != previous_action
+  defp semantic_review_baseline(%Issue{} = issue) do
+    events = actionable_review_events(issue)
+
+    %{
+      actionable_event_ids: Enum.map(events, & &1.id),
+      latest_human_change_request_id: latest_event_id(events, "human_change_request"),
+      pr_head_sha: latest_event_value(events, "pr_head"),
+      unresolved_review_thread_ids: event_ids_by_kind(events, ["review_thread", "codex_review", "copilot_review"]),
+      check_event_ids: event_ids_by_kind(events, ["check_annotation", "check_failure"]),
+      policy_event_ids: event_ids_by_kind(events, ["policy", "checkpoint", "pr_head"]),
+      events: events
+    }
   end
 
-  defp review_action_changed?(_previous_checkpoint, _checkpoint), do: false
+  defp actionable_review_events(%Issue{} = issue) do
+    issue
+    |> issue_review_events()
+    |> Enum.map(&normalize_review_event/1)
+    |> Enum.reject(&is_nil/1)
+    |> Enum.filter(&review_event_actionable?/1)
+    |> Enum.uniq_by(& &1.id)
+    |> Enum.sort_by(& &1.id)
+  end
+
+  defp issue_review_events(%Issue{review_events: events, review_action: review_action}) when is_list(events) do
+    maybe_prepend_review_action_event(events, review_action)
+  end
+
+  defp issue_review_events(%Issue{review_action: review_action}) do
+    maybe_prepend_review_action_event([], review_action)
+  end
+
+  defp maybe_prepend_review_action_event(events, review_action) when is_binary(review_action) and review_action != "" do
+    [%{id: review_action, kind: "human_change_request", source: "linear_comment", actionable: true} | events]
+  end
+
+  defp maybe_prepend_review_action_event(events, _review_action), do: events
+
+  defp normalize_review_event(%{} = event) do
+    event = Map.new(event, fn {key, value} -> {normalize_event_key(key), value} end)
+    kind = normalize_review_event_kind(event[:kind] || event[:type] || event[:source])
+    id = normalize_review_event_id(event, kind)
+
+    if is_binary(id) and id != "" do
+      %{
+        id: id,
+        kind: kind || "review_event",
+        value: normalize_event_value(event),
+        actionable: Map.get(event, :actionable, true),
+        resolved: Map.get(event, :resolved, false),
+        outdated: Map.get(event, :outdated, false),
+        blocked: Map.get(event, :blocked, false),
+        requires_human: Map.get(event, :requires_human, false),
+        infrastructure_failure: Map.get(event, :infrastructure_failure, false),
+        conclusion: normalize_review_event_kind(event[:conclusion]),
+        status: normalize_review_event_kind(event[:status])
+      }
+    end
+  end
+
+  defp normalize_review_event(event) when is_binary(event) do
+    normalize_review_event(%{id: event, kind: "review_event", actionable: true})
+  end
+
+  defp normalize_review_event(_event), do: nil
+
+  defp normalize_event_key(key) when is_atom(key), do: key
+
+  defp normalize_event_key(key) when is_binary(key) do
+    case String.trim(key) do
+      "id" -> :id
+      "kind" -> :kind
+      "type" -> :type
+      "source" -> :source
+      "value" -> :value
+      "sha" -> :sha
+      "annotation_id" -> :annotation_id
+      "annotationId" -> :annotation_id
+      "check_run_id" -> :check_run_id
+      "checkRunId" -> :check_run_id
+      "comment_id" -> :comment_id
+      "commentId" -> :comment_id
+      "actionable" -> :actionable
+      "resolved" -> :resolved
+      "outdated" -> :outdated
+      "blocked" -> :blocked
+      "requires_human" -> :requires_human
+      "requiresHuman" -> :requires_human
+      "infrastructure_failure" -> :infrastructure_failure
+      "infrastructureFailure" -> :infrastructure_failure
+      "conclusion" -> :conclusion
+      "status" -> :status
+      other -> other
+    end
+  end
+
+  defp normalize_event_key(key), do: key
+
+  defp normalize_review_event_kind(value) when is_atom(value), do: value |> Atom.to_string() |> normalize_review_event_kind()
+
+  defp normalize_review_event_kind(value) when is_binary(value) do
+    value
+    |> String.trim()
+    |> String.downcase()
+  end
+
+  defp normalize_review_event_kind(_value), do: nil
+
+  defp normalize_review_event_id(event, kind) do
+    cond do
+      is_binary(event[:id]) ->
+        event[:id]
+
+      kind == "pr_head" and is_binary(event[:sha]) ->
+        "pr_head:#{event[:sha]}"
+
+      kind == "check_annotation" and is_binary(event[:annotation_id]) ->
+        "check_annotation:#{event[:annotation_id]}"
+
+      kind == "check_failure" and is_binary(event[:check_run_id]) ->
+        "check_failure:#{event[:check_run_id]}"
+
+      kind == "human_change_request" and is_binary(event[:comment_id]) ->
+        "human_change_request:#{event[:comment_id]}"
+
+      true ->
+        nil
+    end
+  end
+
+  defp normalize_event_value(event) do
+    event[:value] || event[:sha] || event[:annotation_id] || event[:check_run_id] || event[:comment_id]
+  end
+
+  defp review_event_actionable?(%{actionable: actionable}) when actionable in [false, "false", "no", 0], do: false
+  defp review_event_actionable?(%{resolved: resolved}) when resolved in [true, "true", "yes", 1], do: false
+  defp review_event_actionable?(%{outdated: outdated}) when outdated in [true, "true", "yes", 1], do: false
+  defp review_event_actionable?(%{blocked: blocked}) when blocked in [true, "true", "yes", 1], do: false
+  defp review_event_actionable?(%{requires_human: requires_human}) when requires_human in [true, "true", "yes", 1], do: false
+
+  defp review_event_actionable?(%{infrastructure_failure: infrastructure_failure})
+       when infrastructure_failure in [true, "true", "yes", 1],
+       do: false
+
+  defp review_event_actionable?(%{conclusion: conclusion})
+       when conclusion in ["success", "neutral", "skipped", "cancelled"],
+       do: false
+
+  defp review_event_actionable?(%{status: status})
+       when status in ["resolved", "outdated", "dismissed", "closed"],
+       do: false
+
+  defp review_event_actionable?(_event), do: true
+
+  defp latest_event_id(events, kind) do
+    events
+    |> Enum.filter(&(&1.kind == kind))
+    |> List.last()
+    |> case do
+      nil -> nil
+      event -> event.id
+    end
+  end
+
+  defp latest_event_value(events, kind) do
+    events
+    |> Enum.filter(&(&1.kind == kind))
+    |> List.last()
+    |> case do
+      nil -> nil
+      event -> event.value || event.id
+    end
+  end
+
+  defp event_ids_by_kind(events, kinds) do
+    kind_set = MapSet.new(kinds)
+
+    events
+    |> Enum.filter(&MapSet.member?(kind_set, &1.kind))
+    |> Enum.map(& &1.id)
+  end
+
+  defp checkpoint_actionable_event_ids(checkpoint) do
+    checkpoint
+    |> get_in([:review_baseline, :actionable_event_ids])
+    |> case do
+      ids when is_list(ids) -> MapSet.new(ids)
+      _ -> MapSet.new()
+    end
+  end
+
+  defp review_event_by_id(checkpoint, event_id) do
+    checkpoint
+    |> get_in([:review_baseline, :events])
+    |> case do
+      events when is_list(events) ->
+        Enum.find(events, %{id: event_id, kind: "review_event"}, &(&1.id == event_id))
+
+      _ ->
+        %{id: event_id, kind: "review_event"}
+    end
+  end
+
+  defp review_trigger_id(%{id: id}) when is_binary(id), do: id
+  defp review_trigger_id(_review_trigger), do: "unknown"
+
+  defp review_trigger_kind(%{kind: kind}) when is_binary(kind), do: kind
+  defp review_trigger_kind(_review_trigger), do: "review_event"
+
+  defp review_trigger_reason(review_trigger, prefix) do
+    "#{prefix}:#{review_trigger_kind(review_trigger)}:#{review_trigger_id(review_trigger)}"
+  end
+
+  defp review_loop_guarded?(%State{} = state, issue_id, trigger_id) when is_binary(issue_id) do
+    case Map.get(state.review_rework_triggers, issue_id) do
+      %{trigger_id: ^trigger_id, triggered_at_ms: triggered_at_ms} when is_integer(triggered_at_ms) ->
+        System.monotonic_time(:millisecond) - triggered_at_ms <= @review_loop_guard_window_ms
+
+      _ ->
+        false
+    end
+  end
+
+  defp handle_review_loop_guard(%State{} = state, %Issue{id: issue_id} = issue, review_trigger) do
+    trigger_id = review_trigger_id(review_trigger)
+    reason = review_trigger_reason(review_trigger, "review_loop_guard_human_decision")
+    comment_body = review_loop_guard_comment(issue, review_trigger)
+    comment_result = Tracker.create_comment(issue_id, comment_body)
+
+    if comment_result != :ok do
+      Logger.warning("Failed to post review loop guard comment: #{issue_context(issue)} reason=#{inspect(comment_result)}")
+    end
+
+    {
+      %{
+        queued: false,
+        coalesced: false,
+        issue_id: issue_id,
+        issue_identifier: issue.identifier,
+        reason: reason,
+        review_trigger_id: trigger_id,
+        review_trigger_kind: review_trigger_kind(review_trigger),
+        operations: ["review_check", "loop_guard", "human_decision", "trigger:#{trigger_id}"]
+      },
+      release_issue_claim(state, issue_id)
+    }
+  end
+
+  defp review_loop_guard_comment(%Issue{} = issue, review_trigger) do
+    """
+    ## Symphony Review Loop Guard
+
+    Symphony detected a rapid `Human Review -> Rework -> Human Review -> Rework` pattern for #{issue.identifier || issue.id} without a new actionable review event beyond `#{review_trigger_id(review_trigger)}`.
+
+    Decision needed: confirm whether this is real product rework or clear/reset the stale review signal before dispatching another worker.
+    """
+    |> String.trim()
+  end
 
   defp human_review_state?(state_name) when is_binary(state_name) do
     normalize_issue_state(state_name) in ["human review", "in review"]
