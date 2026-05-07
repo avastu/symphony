@@ -1027,6 +1027,7 @@ defmodule SymphonyElixir.StatusDashboard do
   defp format_rate_limit_bucket(bucket) when is_map(bucket) do
     remaining = map_value(bucket, ["remaining", :remaining])
     limit = map_value(bucket, ["limit", :limit])
+    used_percent = map_value(bucket, ["usedPercent", :usedPercent])
 
     reset_value =
       map_value(bucket, [
@@ -1046,6 +1047,9 @@ defmodule SymphonyElixir.StatusDashboard do
 
     base =
       cond do
+        is_number(used_percent) ->
+          "#{format_percent(max(0, 100 - used_percent))} remaining"
+
         integer_like?(remaining) and integer_like?(limit) ->
           "#{format_count(remaining)}/#{format_count(limit)}"
 
@@ -1095,9 +1099,36 @@ defmodule SymphonyElixir.StatusDashboard do
 
   defp format_rate_limit_credits(other), do: "credits #{to_string(other)}"
 
+  defp format_reset_value(value) when is_integer(value) and value > 1_000_000_000 do
+    seconds_until_reset = value - DateTime.to_unix(DateTime.utc_now())
+
+    if seconds_until_reset > 0 do
+      "in #{format_reset_seconds(seconds_until_reset)}"
+    else
+      "now"
+    end
+  end
+
   defp format_reset_value(value) when is_integer(value), do: "#{format_count(value)}s"
   defp format_reset_value(value) when is_binary(value), do: value
   defp format_reset_value(value), do: to_string(value)
+
+  defp format_reset_seconds(seconds) when seconds >= 86_400, do: "#{div(seconds, 86_400)}d"
+  defp format_reset_seconds(seconds) when seconds >= 3_600, do: "#{div(seconds, 3_600)}h"
+  defp format_reset_seconds(seconds) when seconds >= 60, do: "#{div(seconds, 60)}m"
+  defp format_reset_seconds(seconds), do: "#{max(seconds, 0)}s"
+
+  defp format_percent(value) when is_float(value) do
+    rounded = Float.round(value, 1)
+
+    if rounded == trunc(rounded) do
+      "#{trunc(rounded)}%"
+    else
+      "#{:erlang.float_to_binary(rounded, decimals: 1)}%"
+    end
+  end
+
+  defp format_percent(value) when is_integer(value), do: "#{value}%"
 
   defp format_number(value) when is_integer(value), do: format_count(value)
 

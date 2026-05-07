@@ -194,8 +194,40 @@ defmodule SymphonyElixir.StatusDashboardSnapshotTest do
     Snapshot.assert_dashboard_snapshot!("credits_unlimited", render_snapshot(snapshot_data, 42.0))
   end
 
+  test "rate limit epoch resets render as relative time with remaining percent" do
+    reset_at = DateTime.to_unix(DateTime.utc_now()) + 300
+
+    snapshot_data =
+      {:ok,
+       %{
+         running: [],
+         retrying: [],
+         codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+         rate_limits: %{
+           limit_id: "codex",
+           primary: %{usedPercent: 17, resetsAt: reset_at},
+           secondary: %{usedPercent: 41, resetsAt: reset_at + 600},
+           credits: nil
+         }
+       }}
+
+    rendered = render_snapshot(snapshot_data, 0.0)
+
+    assert rendered =~ "83% remaining"
+    assert rendered =~ "59% remaining"
+    refute rendered =~ "#{format_count_for_test(reset_at)}s"
+  end
+
   defp render_snapshot(snapshot_data, tps) do
     StatusDashboard.format_snapshot_content_for_test(snapshot_data, tps, @terminal_columns)
+  end
+
+  defp format_count_for_test(value) do
+    value
+    |> Integer.to_string()
+    |> String.reverse()
+    |> String.replace(~r/(\d{3})(?=\d)/, "\\1,")
+    |> String.reverse()
   end
 
   defp running_entry(overrides) do
