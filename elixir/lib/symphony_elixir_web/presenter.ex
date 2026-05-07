@@ -3,7 +3,8 @@ defmodule SymphonyElixirWeb.Presenter do
   Shared projections for the observability API and dashboard.
   """
 
-  alias SymphonyElixir.{Config, Orchestrator, StatusDashboard}
+  alias SymphonyElixir.{Config, DeployIntent, Orchestrator, StatusDashboard, Workflow}
+  alias SymphonyElixir.Resume.Store
 
   @spec state_payload(GenServer.name(), timeout()) :: map()
   def state_payload(orchestrator, snapshot_timeout_ms) do
@@ -24,7 +25,8 @@ defmodule SymphonyElixirWeb.Presenter do
           managed_projects: managed_project_payloads(),
           codex_totals: snapshot.codex_totals,
           rate_limits: snapshot.rate_limits,
-          deploy_pending: Map.get(snapshot, :deploy_pending)
+          deploy_pending: Map.get(snapshot, :deploy_pending),
+          runtime_health: runtime_health_payload()
         }
 
       :timeout ->
@@ -206,6 +208,68 @@ defmodule SymphonyElixirWeb.Presenter do
         source: project.source
       }
     end)
+  end
+
+  defp runtime_health_payload do
+    runtime_app_path = File.cwd!() |> Path.expand()
+    runtime_repo_path = runtime_repo_path(runtime_app_path)
+    control_dir = Workflow.workflow_file_path() |> Path.expand() |> Path.dirname()
+    resume_state_dir = Store.state_dir() |> Path.expand()
+
+    %{
+      process: %{
+        os_pid: System.pid(),
+        node: node() |> Atom.to_string(),
+        alive: true
+      },
+      runtime_app_path: runtime_app_path,
+      runtime_repo_path: runtime_repo_path,
+      runtime_git_commit: git_commit(runtime_repo_path),
+      control_dir: control_dir,
+      control_git_commit: git_commit(control_dir),
+      workflow_path: Workflow.workflow_file_path() |> Path.expand(),
+      deploy_intent_path: DeployIntent.path() |> Path.expand(),
+      resume_state_dir: resume_state_dir,
+      resume_state_access: resume_state_access(resume_state_dir)
+    }
+  end
+
+  defp runtime_repo_path(runtime_app_path) do
+    case System.get_env("SYMPHONY_REPO_DIR") do
+      value when is_binary(value) and value != "" -> Path.expand(value)
+      _ -> Path.expand("..", runtime_app_path)
+    end
+  end
+
+  defp git_commit(path) when is_binary(path) do
+    if File.dir?(Path.join(path, ".git")) do
+      case System.cmd("git", ["rev-parse", "HEAD"], cd: path, stderr_to_stdout: true) do
+        {commit, 0} -> String.trim(commit)
+        _ -> nil
+      end
+    end
+  rescue
+    _error -> nil
+  end
+
+  defp resume_state_access(path) do
+    probe_path = Path.join(path, ".symphony-health-probe-#{System.unique_integer([:positive])}")
+
+    result =
+      with :ok <- File.mkdir_p(path),
+           :ok <- File.write(probe_path, "ok"),
+           {:ok, "ok"} <- File.read(probe_path) do
+        %{ok: true, checked_at: DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()}
+      else
+        {:error, reason} ->
+          %{ok: false, error: inspect(reason, limit: 5)}
+
+        other ->
+          %{ok: false, error: inspect(other, limit: 5)}
+      end
+
+    File.rm(probe_path)
+    result
   end
 
   defp recent_events_payload(running) do

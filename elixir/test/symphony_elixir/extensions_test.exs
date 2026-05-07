@@ -422,8 +422,19 @@ defmodule SymphonyElixir.ExtensionsTest do
                "retrying_count" => 1,
                "blocker" => nil,
                "summary" => "Deploy pending: draining 1 running / 1 retrying target=control"
-             }
+             },
+             "runtime_health" => state_payload["runtime_health"]
            }
+
+    assert %{
+             "process" => %{"alive" => true},
+             "runtime_app_path" => _,
+             "runtime_git_commit" => _,
+             "control_dir" => _,
+             "workflow_path" => _,
+             "deploy_intent_path" => _,
+             "resume_state_access" => %{"ok" => true}
+           } = state_payload["runtime_health"]
 
     conn = get(build_conn(), "/api/v1/MT-HTTP")
     issue_payload = json_response(conn, 200)

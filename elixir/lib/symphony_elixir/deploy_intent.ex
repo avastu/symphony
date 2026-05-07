@@ -10,6 +10,9 @@ defmodule SymphonyElixir.DeployIntent do
     "control" => "redeploy-symphony-control",
     "runtime" => "redeploy-symphony"
   }
+  @secret_key_pattern ~r/(authorization|cookie|credential|env|key|password|private|secret|token)/i
+  @secret_value_pattern ~r/(bearer\s+\S+|(sk|rk|xox|ghp|glpat|pat)_[A-Za-z0-9_-]{8,}|-----BEGIN\s+[A-Z ]*PRIVATE\s+KEY-----.*?-----END\s+[A-Z ]*PRIVATE\s+KEY-----)/ims
+  @unsafe_text_pattern ~r/(```|<untrusted|<script|raw prompt|provider transcript|request body|private payload|\.env contents?)/i
 
   @spec load() :: map() | nil
   def load do
@@ -76,7 +79,9 @@ defmodule SymphonyElixir.DeployIntent do
       "running_count" => 0,
       "retrying_count" => 0,
       "blocker" => nil,
+      "failure_count" => Map.get(intent, "failure_count", 0),
       "deploy_started_at" => timestamp(),
+      "last_attempt_at" => timestamp(),
       "updated_at" => timestamp()
     })
     |> write()
@@ -87,7 +92,9 @@ defmodule SymphonyElixir.DeployIntent do
     intent
     |> Map.merge(%{
       "status" => "failed",
-      "blocker" => blocker,
+      "blocker" => sanitize_text(blocker),
+      "failure_count" => Map.get(intent, "failure_count", 0) + 1,
+      "last_attempt_at" => timestamp(),
       "updated_at" => timestamp()
     })
     |> write()
@@ -141,7 +148,14 @@ defmodule SymphonyElixir.DeployIntent do
       requested_branch: Map.get(intent, "requested_branch"),
       running_count: Map.get(intent, "running_count", 0),
       retrying_count: Map.get(intent, "retrying_count", 0),
-      blocker: Map.get(intent, "blocker"),
+      failure_count: Map.get(intent, "failure_count", 0),
+      blocker: sanitize(Map.get(intent, "blocker")),
+      health_check: sanitize(Map.get(intent, "health_check")),
+      rollback_packet: sanitize(Map.get(intent, "rollback_packet")),
+      deploy_started_at: Map.get(intent, "deploy_started_at"),
+      deployed_revision: Map.get(intent, "deployed_revision"),
+      completed_at: Map.get(intent, "completed_at") || Map.get(intent, "done_at"),
+      last_attempt_at: Map.get(intent, "last_attempt_at"),
       updated_at: Map.get(intent, "updated_at"),
       summary: summary(intent)
     }
@@ -152,6 +166,12 @@ defmodule SymphonyElixir.DeployIntent do
     |> stringify_keys()
     |> Map.update("status", "pending", &normalize_status/1)
     |> Map.update("target", "control", &normalize_target/1)
+    |> Map.update("running_count", 0, &to_integer/1)
+    |> Map.update("retrying_count", 0, &to_integer/1)
+    |> Map.update("failure_count", 0, &to_integer/1)
+    |> Map.put_new("health_check", nil)
+    |> Map.put_new("rollback_packet", nil)
+    |> Map.update("blocker", nil, &sanitize_text/1)
   end
 
   defp decode(path, body) do
@@ -171,7 +191,12 @@ defmodule SymphonyElixir.DeployIntent do
     %{
       "status" => "failed",
       "target" => "unknown",
+      "running_count" => 0,
+      "retrying_count" => 0,
+      "failure_count" => 1,
       "blocker" => blocker,
+      "health_check" => nil,
+      "rollback_packet" => nil,
       "updated_at" => timestamp()
     }
   end
@@ -182,6 +207,50 @@ defmodule SymphonyElixir.DeployIntent do
 
   defp normalize_status(status), do: status |> to_string() |> String.trim() |> String.downcase()
   defp normalize_target(target), do: target |> to_string() |> String.trim() |> String.downcase()
+
+  defp to_integer(value) when is_integer(value), do: value
+
+  defp to_integer(value) do
+    case Integer.parse(to_string(value)) do
+      {number, _rest} -> number
+      :error -> 0
+    end
+  end
+
+  defp sanitize(nil), do: nil
+
+  defp sanitize(value) when is_map(value) do
+    Map.new(value, fn {key, child_value} -> {to_string(key), sanitize_keyed(key, child_value)} end)
+  end
+
+  defp sanitize(value) when is_list(value), do: Enum.map(value, &sanitize/1)
+  defp sanitize(value) when is_number(value) or is_boolean(value), do: value
+  defp sanitize(value), do: sanitize_text(value)
+
+  defp sanitize_keyed(key, value) do
+    key = to_string(key)
+
+    if Regex.match?(@secret_key_pattern, key) do
+      "[redacted]"
+    else
+      sanitize(value)
+    end
+  end
+
+  defp sanitize_text(nil), do: nil
+
+  defp sanitize_text(value) do
+    text = value |> to_string() |> String.trim()
+
+    if Regex.match?(@unsafe_text_pattern, text) do
+      "[redacted]"
+    else
+      @secret_value_pattern
+      |> Regex.replace(text, "[redacted]")
+      |> String.replace(~r/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/u, "")
+      |> String.slice(0, 1_000)
+    end
+  end
 
   defp control_dir do
     System.get_env("SYMPHONY_CONTROL_DIR") ||

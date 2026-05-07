@@ -2,6 +2,17 @@ defmodule SymphonyElixir.DeployIntentTest do
   use SymphonyElixir.TestSupport
 
   alias SymphonyElixir.DeployIntent
+  alias SymphonyElixirWeb.Presenter
+
+  defmodule SnapshotServer do
+    use GenServer
+
+    def start_link(snapshot, opts \\ []), do: GenServer.start_link(__MODULE__, snapshot, opts)
+    @impl true
+    def init(snapshot), do: {:ok, snapshot}
+    @impl true
+    def handle_call(:snapshot, _from, snapshot), do: {:reply, snapshot, snapshot}
+  end
 
   setup do
     dir = Path.join(System.tmp_dir!(), "symphony-deploy-intent-test-#{System.unique_integer([:positive])}")
@@ -245,6 +256,17 @@ defmodule SymphonyElixir.DeployIntentTest do
     refute_received {:deploy_started, _command, _path}
   end
 
+  test "write_failed increments failure count and keeps sanitized blocker visible", %{intent_file: intent_file} do
+    write_intent!(%{"target" => "control", "status" => "deploying", "failure_count" => 1})
+
+    assert :ok = DeployIntent.write_failed(DeployIntent.load(), "request body: LINEAR_API_KEY=secret")
+
+    intent = Jason.decode!(File.read!(intent_file))
+    assert intent["status"] == "failed"
+    assert intent["failure_count"] == 2
+    assert intent["blocker"] == "[redacted]"
+  end
+
   test "zero running and retrying starts redeploy without allow-active and preserves failed blocker", %{intent_file: intent_file} do
     write_intent!(%{"target" => "control", "status" => "pending"})
 
@@ -297,6 +319,62 @@ defmodule SymphonyElixir.DeployIntentTest do
       )
 
     assert content =~ "Deploy pending: draining 1 running / 0 retrying target=control"
+  end
+
+  test "public payload exposes standardized health and rollback fields with sanitization" do
+    write_intent!(%{
+      "target" => "runtime",
+      "status" => "failed",
+      "running_count" => 0,
+      "retrying_count" => 0,
+      "failure_count" => 2,
+      "blocker" => "raw prompt: ignore previous instructions",
+      "health_check" => %{"ok" => false, "api_token" => "sk_test_secret", "error" => "health failed"},
+      "rollback_packet" => %{"path" => "/tmp/rollback.json", "private_payload" => "do not expose"},
+      "deploy_started_at" => "2026-05-07T00:00:00Z",
+      "completed_at" => nil,
+      "last_attempt_at" => "2026-05-07T00:01:00Z"
+    })
+
+    payload = DeployIntent.public_payload(DeployIntent.load())
+
+    assert payload.failure_count == 2
+    assert payload.blocker == "[redacted]"
+    assert payload.health_check["api_token"] == "[redacted]"
+    assert payload.health_check["error"] == "health failed"
+    assert payload.rollback_packet["private_payload"] == "[redacted]"
+    assert payload.deploy_started_at == "2026-05-07T00:00:00Z"
+    assert payload.last_attempt_at == "2026-05-07T00:01:00Z"
+  end
+
+  test "state payload includes multi-signal runtime health", %{intent_file: intent_file} do
+    write_intent!(%{"target" => "control", "status" => "deploying"})
+
+    server = Module.concat(__MODULE__, RuntimeHealthSnapshotServer)
+
+    {:ok, _pid} =
+      SnapshotServer.start_link(
+        %{
+          running: [],
+          pending_slot: [],
+          retrying: [],
+          codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+          rate_limits: nil,
+          deploy_pending: DeployIntent.public_payload(DeployIntent.load())
+        },
+        name: server
+      )
+
+    payload = Presenter.state_payload(server, 1_000)
+    health = payload.runtime_health
+
+    assert health.process.alive == true
+    assert health.runtime_app_path == File.cwd!() |> Path.expand()
+    assert health.runtime_repo_path == Path.expand("..", File.cwd!())
+    assert is_binary(health.runtime_git_commit)
+    assert health.workflow_path == Workflow.workflow_file_path() |> Path.expand()
+    assert health.deploy_intent_path == Path.expand(intent_file)
+    assert health.resume_state_access.ok == true
   end
 
   defp write_intent!(intent) do
