@@ -698,6 +698,55 @@ defmodule SymphonyElixir.CoreTest do
     assert_due_in_range(due_at_ms, 0, 1_100)
   end
 
+  test "codex worker activity checkpoints are throttled on hot update path" do
+    issue_id = "issue-codex-checkpoint-throttle"
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-590",
+      state: "In Progress",
+      title: "Throttle resume checkpoints"
+    }
+
+    assert {:ok, %{run: run, lease: lease}} = Store.create_run_and_lease(issue)
+
+    running_entry = %{
+      pid: self(),
+      ref: make_ref(),
+      identifier: issue.identifier,
+      issue: issue,
+      run_id: Map.fetch!(run, "run_id"),
+      lease_id: Map.fetch!(lease, "lease_id"),
+      session_id: nil,
+      started_at: DateTime.utc_now(),
+      workspace_path: Path.join(System.tmp_dir!(), "missing-workspace"),
+      turn_count: 0
+    }
+
+    state = %Orchestrator.State{
+      running: %{issue_id => running_entry},
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      observability_metrics_last_persisted_at_ms: System.monotonic_time(:millisecond),
+      dashboard_last_notified_at_ms: System.monotonic_time(:millisecond)
+    }
+
+    {:noreply, state} =
+      Orchestrator.handle_info(
+        {:codex_worker_update, issue_id, %{event: :agent_message, timestamp: DateTime.utc_now(), payload: "first"}},
+        state
+      )
+
+    assert length(checkpoint_files(issue_id)) == 1
+
+    {:noreply, _state} =
+      Orchestrator.handle_info(
+        {:codex_worker_update, issue_id, %{event: :agent_message, timestamp: DateTime.utc_now(), payload: "second"}},
+        state
+      )
+
+    assert length(checkpoint_files(issue_id)) == 1
+  end
+
   test "normal worker exit in Human Review does not schedule continuation retry" do
     issue_id = "issue-human-review"
     ref = make_ref()
@@ -2888,5 +2937,9 @@ defmodule SymphonyElixir.CoreTest do
     after
       File.rm_rf(test_root)
     end
+  end
+
+  defp checkpoint_files(issue_id) do
+    Path.wildcard(Path.join([Config.settings!().resume.state_dir, "checkpoints", issue_id, "*.json"]))
   end
 end

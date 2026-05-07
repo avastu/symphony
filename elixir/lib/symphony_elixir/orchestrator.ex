@@ -47,6 +47,16 @@ defmodule SymphonyElixir.Orchestrator do
   # Slightly above the dashboard render interval so "checking now…" can render.
   @poll_transition_render_delay_ms 20
   @observability_metrics_flush_interval_ms 5_000
+  @codex_activity_checkpoint_flush_interval_ms 5_000
+  @codex_worker_dashboard_notify_interval_ms 1_000
+  @codex_activity_immediate_checkpoint_events MapSet.new([
+                                                :session_started,
+                                                "session_started",
+                                                :turn_completed,
+                                                "turn_completed",
+                                                :turn_failed,
+                                                "turn_failed"
+                                              ])
   @empty_token_delta %{
     input_tokens: 0,
     output_tokens: 0,
@@ -77,6 +87,8 @@ defmodule SymphonyElixir.Orchestrator do
       codex_totals: nil,
       codex_rate_limits: nil,
       completed_count: 0,
+      resume_checkpoint_last_persisted_at_ms_by_issue: %{},
+      dashboard_last_notified_at_ms: nil,
       observability_metrics_pending_delta: %{
         input_tokens: 0,
         output_tokens: 0,
@@ -110,6 +122,7 @@ defmodule SymphonyElixir.Orchestrator do
       codex_totals: ObservabilityMetrics.codex_totals(),
       codex_rate_limits: nil,
       completed_count: ObservabilityMetrics.completed_count(),
+      dashboard_last_notified_at_ms: now_ms,
       observability_metrics_last_persisted_at_ms: now_ms
     }
 
@@ -215,14 +228,14 @@ defmodule SymphonyElixir.Orchestrator do
 
       running_entry ->
         {updated_running_entry, token_delta} = integrate_codex_update(running_entry, update)
-        persist_running_checkpoint(updated_running_entry, :codex_activity, %{codex_event: update})
 
         state =
           state
           |> apply_codex_token_delta(token_delta)
           |> apply_codex_rate_limits(update)
+          |> maybe_persist_codex_activity_checkpoint(issue_id, updated_running_entry, update)
+          |> maybe_notify_dashboard_for_codex_update()
 
-        notify_dashboard()
         {:noreply, %{state | running: Map.put(running, issue_id, updated_running_entry)}}
     end
   end
@@ -1462,6 +1475,19 @@ defmodule SymphonyElixir.Orchestrator do
     StatusDashboard.notify_update()
   end
 
+  defp maybe_notify_dashboard_for_codex_update(%State{} = state) do
+    now_ms = System.monotonic_time(:millisecond)
+    last_notified_at_ms = state.dashboard_last_notified_at_ms
+
+    if is_integer(last_notified_at_ms) and
+         now_ms - last_notified_at_ms < @codex_worker_dashboard_notify_interval_ms do
+      state
+    else
+      notify_dashboard()
+      %{state | dashboard_last_notified_at_ms: now_ms}
+    end
+  end
+
   defp handle_active_retry(state, issue, attempt, metadata) do
     if retry_candidate_issue?(issue, terminal_state_set()) and
          dispatch_slots_available?(issue, state) and
@@ -2595,6 +2621,37 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp persist_running_checkpoint(_running_entry, _phase, _metadata), do: :ok
+
+  defp maybe_persist_codex_activity_checkpoint(
+         %State{} = state,
+         issue_id,
+         running_entry,
+         update
+       )
+       when is_binary(issue_id) and is_map(running_entry) and is_map(update) do
+    now_ms = System.monotonic_time(:millisecond)
+    last_persisted_at_ms = Map.get(state.resume_checkpoint_last_persisted_at_ms_by_issue, issue_id)
+
+    if codex_activity_checkpoint_due?(last_persisted_at_ms, now_ms, update) do
+      persist_running_checkpoint(running_entry, :codex_activity, %{codex_event: update})
+
+      %{
+        state
+        | resume_checkpoint_last_persisted_at_ms_by_issue: Map.put(state.resume_checkpoint_last_persisted_at_ms_by_issue, issue_id, now_ms)
+      }
+    else
+      state
+    end
+  end
+
+  defp maybe_persist_codex_activity_checkpoint(%State{} = state, _issue_id, _running_entry, _update),
+    do: state
+
+  defp codex_activity_checkpoint_due?(last_persisted_at_ms, now_ms, update) do
+    not is_integer(last_persisted_at_ms) or
+      MapSet.member?(@codex_activity_immediate_checkpoint_events, Map.get(update, :event)) or
+      now_ms - last_persisted_at_ms >= @codex_activity_checkpoint_flush_interval_ms
+  end
 
   defp update_run_checkpoint(issue_id, run_id, persisted) do
     _ =
