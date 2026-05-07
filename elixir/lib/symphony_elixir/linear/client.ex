@@ -722,6 +722,7 @@ defmodule SymphonyElixir.Linear.Client do
   defp review_events(%{"comments" => %{"nodes" => comments}}) when is_list(comments) do
     comments
     |> Enum.reject(&workpad_comment?/1)
+    |> Enum.sort_by(&comment_updated_at_sort_key/1, :desc)
     |> Enum.flat_map(&comment_review_events/1)
     |> Enum.uniq_by(&Map.get(&1, :id))
   end

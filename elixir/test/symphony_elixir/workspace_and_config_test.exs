@@ -399,8 +399,14 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
             "updatedAt" => "2026-05-06T23:20:00Z"
           },
           %{
-            "id" => "comment-check",
+            "id" => "comment-check-old",
             "body" => "Symphony Review Event: check_annotation:ann-7",
+            "createdAt" => "2026-05-06T23:19:00Z",
+            "updatedAt" => "2026-05-06T23:19:00Z"
+          },
+          %{
+            "id" => "comment-check",
+            "body" => "Symphony Review Event: check_annotation:ann-7 resolved",
             "createdAt" => "2026-05-06T23:21:00Z",
             "updatedAt" => "2026-05-06T23:21:00Z"
           }
@@ -416,7 +422,8 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert issue.review_action == "rework:comment-revise"
 
     assert %{id: "rework:comment-revise", kind: "human_change_request", source: "linear_comment", actionable: true} in issue.review_events
-    assert %{id: "check_annotation:ann-7", kind: "check_annotation", source: "linear_comment", actionable: true} in issue.review_events
+    assert %{id: "check_annotation:ann-7", kind: "check_annotation", source: "linear_comment", actionable: false} in issue.review_events
+    refute %{id: "check_annotation:ann-7", kind: "check_annotation", source: "linear_comment", actionable: true} in issue.review_events
   end
 
   test "linear client marks explicitly unassigned issues as not routed to worker" do
