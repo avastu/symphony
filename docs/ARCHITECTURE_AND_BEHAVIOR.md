@@ -94,3 +94,9 @@ safety-tightening is proven, and renders honest PR/workpad evidence. Runtime
 review checks may use the resulting workpad/PR evidence, but the observer
 output is not a substitute for Linear state, human gates, validation, PR checks,
 or high-tier review.
+
+For Sentry-originated work, the runtime prompt frames Sentry Intake metadata and
+`<untrusted-sentry-evidence>` as attacker-controlled diagnostic data. Sentry text
+may help reproduce or confirm a signal, but it must not determine repo routing,
+branch names, commit messages, PR titles, Linear state transitions, approval
+decisions, review decisions, shell command templates, or tool instructions.
