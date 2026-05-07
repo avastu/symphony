@@ -2,7 +2,7 @@
 ╭─ SYMPHONY STATUS
 │ Agents: 2/10
 │ Throughput: 1,842 tps
-│ Runtime: 72m 1s
+│ Runtime: 1h 12m
 │ Tokens: in 250,000 | out 18,500 | total 268,500
 │ Rate Limits: gpt-5 | primary 12,345/20,000 reset 30s | secondary 45/60 reset 12s | credits 9876.50
 │ Project: https://linear.app/project/project/issues

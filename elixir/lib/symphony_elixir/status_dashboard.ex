@@ -777,9 +777,27 @@ defmodule SymphonyElixir.StatusDashboard do
   defp format_retry_error(_), do: ""
 
   defp format_runtime_seconds(seconds) when is_integer(seconds) do
-    mins = div(seconds, 60)
-    secs = rem(seconds, 60)
-    "#{mins}m #{secs}s"
+    cond do
+      seconds >= 365 * 24 * 60 * 60 ->
+        years = div(seconds, 365 * 24 * 60 * 60)
+        days = seconds |> rem(365 * 24 * 60 * 60) |> div(24 * 60 * 60)
+        "#{years}y #{days}d"
+
+      seconds >= 24 * 60 * 60 ->
+        days = div(seconds, 24 * 60 * 60)
+        hours = seconds |> rem(24 * 60 * 60) |> div(60 * 60)
+        "#{days}d #{hours}h"
+
+      seconds >= 60 * 60 ->
+        hours = div(seconds, 60 * 60)
+        mins = seconds |> rem(60 * 60) |> div(60)
+        "#{hours}h #{mins}m"
+
+      true ->
+        mins = div(seconds, 60)
+        secs = rem(seconds, 60)
+        "#{mins}m #{secs}s"
+    end
   end
 
   defp format_runtime_seconds(seconds) when is_binary(seconds), do: seconds
