@@ -83,7 +83,7 @@ Important boundary:
 3. `Issue Tracker Client`
    - Fetches candidate issues in active states.
    - Fetches current states for specific issue IDs (reconciliation).
-   - Fetches terminal-state issues during startup cleanup.
+   - Fetches active/review/terminal issue facts used by reconciliation.
    - Normalizes tracker payloads into a stable issue model.
 
 4. `Orchestrator`
@@ -271,6 +271,31 @@ Fields:
 - `completed` (set of issue IDs; bookkeeping only, not dispatch gating)
 - `codex_totals` (aggregate tokens + runtime seconds)
 - `codex_rate_limits` (latest rate-limit snapshot from agent events)
+
+#### 4.1.9 Durable Resume Records
+
+Implementations SHOULD persist sanitized coordination records across process
+restarts:
+
+- `IssueRun`: one durable worker attempt for an issue/session, including issue
+  id, identifier, run id, session key, issue/workpad state at claim, workspace,
+  worker host, lifecycle state, attempt, latest checkpoint id, lease id, and
+  timestamps.
+- `RunnerLease`: duplicate guard for a worker, including lease id, run id,
+  issue/session key, worker host, owner instance id, status, heartbeat time, and
+  expiry time.
+- `WorkspaceCheckpoint`: latest safe boundary metadata for a workspace/run,
+  including repo/branch/head/dirty summaries, workpad state/phase, session ids,
+  PR/url metadata if known, and resume instructions.
+- `ResumePacket`: visible blocked/failed/resume metadata written when automatic
+  relaunch is unsafe or when a parent control issue resumes after a child gate.
+- Scheduler lock: short-TTL lock acquired before startup reconciliation and
+  before retry/resume actions.
+
+These records MUST be metadata and sanitized summaries only. They MUST NOT
+persist raw coding-agent prompts, raw tool output, provider transcripts, request
+bodies, `.env` contents, secret-like values, or unbounded private tracker
+payloads.
 
 ### 4.2 Stable Identifiers and Normalization Rules
 
@@ -694,17 +719,22 @@ Distinct terminal reasons are important because retry logic and logs differ.
 ### 7.4 Idempotency and Recovery Rules
 
 - The orchestrator serializes state mutations through one authority to avoid duplicate dispatch.
-- `claimed` and `running` checks are REQUIRED before launching any worker.
+- `claimed`, `running`, and durable runner-lease checks are REQUIRED before
+  launching any worker.
 - Reconciliation runs before dispatch on every tick.
-- Restart recovery is tracker-driven and filesystem-driven (without a durable orchestrator DB).
-- Startup terminal cleanup removes stale workspaces for issues already in terminal states.
+- Restart recovery is tracker-driven, filesystem-driven, and durable-resume-state-driven.
+- Runner lease expiry is only a signal. It MUST NOT directly start duplicate
+  work without acquiring a scheduler/resume lock and refreshing current tracker
+  and workpad state.
+- Existing and dirty workspaces MUST NOT be discarded automatically as part of
+  restart recovery.
 
 ## 8. Polling, Scheduling, and Reconciliation
 
 ### 8.1 Poll Loop
 
-At startup, the service validates config, performs startup cleanup, schedules an immediate tick, and
-then repeats every `polling.interval_ms`.
+At startup, the service validates config, runs startup resume reconciliation,
+schedules an immediate tick, and then repeats every `polling.interval_ms`.
 
 The effective poll interval SHOULD be updated when workflow config changes are re-applied.
 
@@ -728,6 +758,8 @@ An issue is dispatch-eligible only if all are true:
 - Its state is in `active_states` and not in `terminal_states`.
 - It is not already in `running`.
 - It is not already in `claimed`.
+- It has no open durable runner lease or blocked resume packet for the same
+  issue/session.
 - Global concurrency slots are available.
 - Per-state concurrency slots are available.
 - Blocker rule for `Todo` state passes:
@@ -775,12 +807,8 @@ Retry handling behavior:
    - Otherwise requeue with error `no available orchestrator slots`.
 5. If found but no longer active, release claim.
 
-Note:
-
-- Terminal-state workspace cleanup is handled by startup cleanup and active-run reconciliation
-  (including terminal transitions for currently running issues).
-- Retry handling mainly operates on active candidates and releases claims when the issue is absent,
-  rather than performing terminal cleanup itself.
+Retry handling MUST acquire the scheduler/resume lock before re-dispatching a
+claim that may have survived a worker or process failure.
 
 ### 8.5 Active Run Reconciliation
 
@@ -803,15 +831,29 @@ Part B: Tracker state refresh
   - If tracker state is neither active nor terminal: terminate worker without workspace cleanup.
 - If state refresh fails, keep workers running and try again on the next tick.
 
-### 8.6 Startup Terminal Workspace Cleanup
+### 8.6 Startup Resume Reconciliation
 
 When the service starts:
 
-1. Query tracker for issues in terminal states.
-2. For each returned issue identifier, remove the corresponding workspace directory.
-3. If the terminal-issues fetch fails, log a warning and continue startup.
+1. Acquire the scheduler lock.
+2. If deploy intent is pending, draining, deploying, or failed, keep dispatch
+   closed and do not relaunch issue work.
+3. Verify runtime path, workflow path, runtime commit, and companion/control
+   availability using implementation-defined checks.
+4. Load persisted `IssueRun`, `RunnerLease`, `WorkspaceCheckpoint`, and review
+   checkpoint metadata.
+5. Expire stale leases, but treat expiry as evidence only.
+6. Fetch active/review tracker issues and latest workpad fields.
+7. Detect issues whose workpad says `State: working` but no in-memory runner or
+   active lease exists after the configured stale interval.
+8. Relaunch only from the latest safe workspace checkpoint.
+9. If no safe checkpoint exists, write a visible blocked/failed resume packet
+   instead of retrying.
+10. Resume parent control issues whose specific child blockers are terminal or
+    merged, without starting duplicate child work.
+11. Release the scheduler lock, then start normal dispatch.
 
-This prevents stale terminal workspaces from accumulating after restarts.
+Startup reconciliation MUST preserve workspaces and dirty changes.
 
 ## 9. Workspace Management and Safety
 
@@ -1146,7 +1188,7 @@ An implementation MUST support these tracker adapter operations:
    - Return issues in configured active states for a configured project.
 
 2. `fetch_issues_by_states(state_names)`
-   - Used for startup terminal cleanup.
+   - Used for review-state scans and startup reconciliation.
 
 3. `fetch_issue_states_by_ids(issue_ids)`
    - Used for active-run reconciliation.
@@ -1601,19 +1643,21 @@ API design notes:
 
 ### 14.3 Partial State Recovery (Restart)
 
-Current design is intentionally in-memory for scheduler state.
-Restart recovery means the service can resume useful operation by polling tracker state and reusing
-preserved workspaces. It does not mean retry timers, running sessions, or live worker state survive
-process restart.
+Current design keeps live workers in memory but persists sanitized resume
+metadata. Restart recovery means the service can resume useful operation by
+polling tracker state, checking durable leases/checkpoints, and reusing
+preserved workspaces. It does not mean live worker processes survive process
+restart.
 
 After restart:
 
 - No retry timers are restored from prior process memory.
 - No running sessions are assumed recoverable.
 - Service recovers by:
-  - startup terminal workspace cleanup
+  - startup resume reconciliation under scheduler lock
   - fresh polling of active issues
-  - re-dispatching eligible work
+  - re-dispatching eligible work only when no open lease or blocked resume
+    packet prevents it
 
 ### 14.4 Operator Intervention Points
 
@@ -1728,7 +1772,7 @@ function start_service():
     log_validation_error(validation)
     fail_startup(validation)
 
-  startup_terminal_workspace_cleanup()
+  startup_resume_reconciliation()
   schedule_tick(delay_ms=0)
 
   event_loop(state)
@@ -2124,7 +2168,11 @@ Use the same validation profiles as Section 17:
 - Exponential retry queue with continuation retries after normal exit
 - Configurable retry backoff cap (`agent.max_retry_backoff_ms`, default 5m)
 - Reconciliation that stops runs on terminal/non-active tracker states
-- Workspace cleanup for terminal issues (startup sweep + active transition)
+- Durable resume records for issue runs, runner leases, workspace checkpoints,
+  scheduler locks, and resume packets
+- Startup resume reconciliation before normal dispatch
+- Duplicate prevention using in-memory claims/runners plus open durable leases
+- Workspace cleanup for terminal issues during active transition
 - Structured logs with `issue_id`, `issue_identifier`, and `session_id`
 - Operator-visible observability (structured logs; OPTIONAL snapshot/status surface)
 
@@ -2134,7 +2182,8 @@ Use the same validation profiles as Section 17:
   exposes the baseline endpoints/error semantics in Section 13.7 if shipped.
 - `linear_graphql` client-side tool extension exposes raw Linear GraphQL access through the
   app-server session using configured Symphony auth.
-- TODO: Persist retry queue and session metadata across process restarts.
+- OPTIONAL: Persist the exact retry timer queue across process restarts. Baseline durable resume
+  records are sufficient to prevent duplicate workers and recover from safe checkpoints.
 - TODO: Make observability settings configurable in workflow front matter without prescribing UI
   implementation details.
 - TODO: Add first-class tracker write APIs (comments/state transitions) in the orchestrator instead

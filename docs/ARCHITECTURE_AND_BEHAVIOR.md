@@ -1,5 +1,39 @@
 # Architecture And Behavior
 
+## Durable Resume Spine
+
+Runtime dispatch now has a file-backed resume spine. The scheduler writes
+sanitized `IssueRun`, `RunnerLease`, `WorkspaceCheckpoint`, scheduler lock, and
+resume-packet records before and during worker execution. These records are
+coordination metadata only: they must not contain raw Codex prompts, raw tool
+output, provider transcripts, request bodies, `.env` values, secret-like values,
+or unbounded private Linear payloads.
+
+A runner lease is a duplicate guard, not permission to relaunch. Workers
+heartbeat active leases while they run. If a lease expires, normal dispatch must
+still treat the open lease as owned until startup/retry reconciliation acquires
+the scheduler lock, refreshes current Linear/workpad state, verifies no active
+runner owns the issue, and closes the stale lease.
+
+Startup reconciliation runs before normal dispatch. Its order is:
+
+1. Acquire the scheduler lock.
+2. Respect deploy-pending intent and keep dispatch closed while deploy is
+   pending, draining, deploying, or failed.
+3. Verify runtime/workflow/deploy-intent paths and runtime commit metadata.
+4. Expire stale leases and hydrate the latest persisted checkpoints.
+5. Fetch active and review Linear issues and workpad fields.
+6. Relaunch stale `State: working` issues only from a safe checkpoint.
+7. Write a visible blocked resume packet when no safe checkpoint exists or a
+   retry would be non-idempotent.
+8. Resume parent control issues whose specific child blockers are terminal,
+   without starting duplicate child work.
+9. Release the lock, then let the normal dispatch loop proceed.
+
+Workspace cleanup is not a crash-recovery mechanism. Dirty or existing
+workspaces are preserved; resume packets and checkpoints describe the workspace
+state so a later worker or human can continue in place.
+
 ## Review/Rework Boundary
 
 `Human Review` is a durable wait boundary. The normal worker path may return an issue from `Rework` to `Human Review`; that return establishes a fresh semantic review baseline and must not be treated as a new request for product rework.

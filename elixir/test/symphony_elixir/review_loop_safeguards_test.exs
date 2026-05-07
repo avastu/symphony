@@ -1,6 +1,8 @@
 defmodule SymphonyElixir.ReviewLoopSafeguardsTest do
   use SymphonyElixir.TestSupport
 
+  alias SymphonyElixir.Resume.Store
+
   setup do
     write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
     Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
@@ -253,5 +255,16 @@ defmodule SymphonyElixir.ReviewLoopSafeguardsTest do
     }
   end
 
-  defp claim(%Orchestrator.State{} = state, issue_id), do: %{state | claimed: MapSet.new([issue_id])}
+  defp claim(%Orchestrator.State{} = state, issue_id) do
+    close_test_leases(issue_id)
+    %{state | running: %{}, claimed: MapSet.new([issue_id])}
+  end
+
+  defp close_test_leases(issue_id) do
+    Store.list_runner_leases()
+    |> Enum.filter(&(Map.get(&1, "issue_id") == issue_id and Store.open_lease?(&1)))
+    |> Enum.each(fn lease ->
+      _ = Store.close_runner_lease(Map.get(lease, "lease_id"), "test_completed", %{})
+    end)
+  end
 end

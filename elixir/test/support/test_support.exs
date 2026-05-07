@@ -33,7 +33,7 @@ defmodule SymphonyElixir.TestSupport do
 
         File.mkdir_p!(workflow_root)
         workflow_file = Path.join(workflow_root, "WORKFLOW.md")
-        write_workflow_file!(workflow_file)
+        write_workflow_file!(workflow_file, resume_state_dir: Path.join(workflow_root, "resume"))
         Workflow.set_workflow_file_path(workflow_file)
         if Process.whereis(SymphonyElixir.WorkflowStore), do: SymphonyElixir.WorkflowStore.force_reload()
         stop_default_http_server()
@@ -54,6 +54,7 @@ defmodule SymphonyElixir.TestSupport do
   end
 
   def write_workflow_file!(path, overrides \\ []) do
+    overrides = Keyword.put_new(overrides, :resume_state_dir, Path.join(Path.dirname(path), "resume"))
     workflow = workflow_content(overrides)
     File.write!(path, workflow)
 
@@ -117,6 +118,11 @@ defmodule SymphonyElixir.TestSupport do
           max_turns: 20,
           max_retry_backoff_ms: 300_000,
           max_concurrent_agents_by_state: %{},
+          resume_state_dir: Path.join(System.tmp_dir!(), "symphony_resume_state"),
+          resume_lease_ttl_ms: 600_000,
+          resume_heartbeat_interval_ms: 30_000,
+          resume_stale_working_interval_ms: 600_000,
+          resume_lock_ttl_ms: 60_000,
           codex_command: "codex app-server",
           codex_approval_policy: %{reject: %{sandbox_approval: true, rules: true, mcp_elicitations: true}},
           codex_thread_sandbox: "workspace-write",
@@ -157,6 +163,11 @@ defmodule SymphonyElixir.TestSupport do
     max_turns = Keyword.get(config, :max_turns)
     max_retry_backoff_ms = Keyword.get(config, :max_retry_backoff_ms)
     max_concurrent_agents_by_state = Keyword.get(config, :max_concurrent_agents_by_state)
+    resume_state_dir = Keyword.get(config, :resume_state_dir)
+    resume_lease_ttl_ms = Keyword.get(config, :resume_lease_ttl_ms)
+    resume_heartbeat_interval_ms = Keyword.get(config, :resume_heartbeat_interval_ms)
+    resume_stale_working_interval_ms = Keyword.get(config, :resume_stale_working_interval_ms)
+    resume_lock_ttl_ms = Keyword.get(config, :resume_lock_ttl_ms)
     codex_command = Keyword.get(config, :codex_command)
     codex_approval_policy = Keyword.get(config, :codex_approval_policy)
     codex_thread_sandbox = Keyword.get(config, :codex_thread_sandbox)
@@ -200,6 +211,12 @@ defmodule SymphonyElixir.TestSupport do
         "  max_turns: #{yaml_value(max_turns)}",
         "  max_retry_backoff_ms: #{yaml_value(max_retry_backoff_ms)}",
         "  max_concurrent_agents_by_state: #{yaml_value(max_concurrent_agents_by_state)}",
+        "resume:",
+        "  state_dir: #{yaml_value(resume_state_dir)}",
+        "  lease_ttl_ms: #{yaml_value(resume_lease_ttl_ms)}",
+        "  heartbeat_interval_ms: #{yaml_value(resume_heartbeat_interval_ms)}",
+        "  stale_working_interval_ms: #{yaml_value(resume_stale_working_interval_ms)}",
+        "  lock_ttl_ms: #{yaml_value(resume_lock_ttl_ms)}",
         "codex:",
         "  command: #{yaml_value(codex_command)}",
         "  approval_policy: #{yaml_value(codex_approval_policy)}",

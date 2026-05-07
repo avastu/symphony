@@ -1,5 +1,37 @@
 # Operator Runbook
 
+## Crash Restart / Durable Resume
+
+On runtime start, Symphony reconciles durable resume state before normal
+dispatch. Do not restart the service as a substitute for issue resume logic.
+
+First checks after a crash or suspected duplicate:
+
+```sh
+curl -sS http://127.0.0.1:4040/api/v1/state
+rg -n "Boot reconciliation|Resume store|RunnerLease|WorkspaceCheckpoint|Resume Packet" \
+  /Users/utsav/dev/symphony-control/log/symphony-service.log \
+  /Users/utsav/dev/symphony-control/log/log/symphony.log*
+```
+
+Expected behavior:
+
+- open non-expired leases prevent duplicate workers for the same issue/session
+- expired leases are only signals; the scheduler lock must be acquired before
+  any relaunch or block action
+- stale `State: working` workpads with safe checkpoints can relaunch in the
+  same workspace
+- stale `State: working` workpads without safe checkpoints receive a visible
+  `## Symphony Resume Packet` and remain blocked from automatic duplicate
+  dispatch
+- dirty workspaces are never deleted or reset by crash recovery
+- parent control issues can resume after named child blockers reach terminal
+  states, without dispatching the child again
+
+Durable state lives in the configured `resume.state_dir`. Inspect it only as
+metadata; it should contain sanitized summaries, not prompts, tool output,
+provider transcripts, request bodies, `.env` contents, or secret-like values.
+
 ## Review Loop Guard
 
 If a ticket receives a `## Symphony Review Loop Guard` comment, do not dispatch another worker until the review signal is clarified. Check whether the named trigger ID is still actionable in the PR/check/review system.
