@@ -46,6 +46,14 @@ defmodule SymphonyElixir.Orchestrator do
   }
   # Slightly above the dashboard render interval so "checking now…" can render.
   @poll_transition_render_delay_ms 20
+  @observability_metrics_flush_interval_ms 5_000
+  @empty_token_delta %{
+    input_tokens: 0,
+    output_tokens: 0,
+    total_tokens: 0,
+    seconds_running: 0
+  }
+
   defmodule State do
     @moduledoc """
     Runtime state for the orchestrator polling loop.
@@ -68,7 +76,14 @@ defmodule SymphonyElixir.Orchestrator do
       resume_reconciled?: false,
       codex_totals: nil,
       codex_rate_limits: nil,
-      completed_count: 0
+      completed_count: 0,
+      observability_metrics_pending_delta: %{
+        input_tokens: 0,
+        output_tokens: 0,
+        total_tokens: 0,
+        seconds_running: 0
+      },
+      observability_metrics_last_persisted_at_ms: nil
     ]
 
     @type t :: %__MODULE__{}
@@ -94,7 +109,8 @@ defmodule SymphonyElixir.Orchestrator do
       tick_token: nil,
       codex_totals: ObservabilityMetrics.codex_totals(),
       codex_rate_limits: nil,
-      completed_count: ObservabilityMetrics.completed_count()
+      completed_count: ObservabilityMetrics.completed_count(),
+      observability_metrics_last_persisted_at_ms: now_ms
     }
 
     state = run_boot_reconciliation(state)
@@ -1898,6 +1914,7 @@ defmodule SymphonyElixir.Orchestrator do
         }
       )
 
+    state = flush_observability_token_delta(state)
     :ok = ObservabilityMetrics.record_session_completion(running_entry)
 
     %{state | codex_totals: codex_totals}
@@ -2745,11 +2762,62 @@ defmodule SymphonyElixir.Orchestrator do
          %{input_tokens: input, output_tokens: output, total_tokens: total} = token_delta
        )
        when is_integer(input) and is_integer(output) and is_integer(total) do
-    %{state | codex_totals: apply_token_delta(codex_totals, token_delta)}
-    |> tap(fn _state -> ObservabilityMetrics.record_token_delta(token_delta) end)
+    pending_delta =
+      state.observability_metrics_pending_delta
+      |> normalize_token_delta()
+      |> apply_token_delta(token_delta)
+
+    %{
+      state
+      | codex_totals: apply_token_delta(codex_totals, token_delta),
+        observability_metrics_pending_delta: pending_delta
+    }
+    |> maybe_flush_observability_token_delta()
   end
 
   defp apply_codex_token_delta(state, _token_delta), do: state
+
+  defp maybe_flush_observability_token_delta(%State{} = state) do
+    now_ms = System.monotonic_time(:millisecond)
+    last_persisted_at_ms = state.observability_metrics_last_persisted_at_ms
+
+    if is_integer(last_persisted_at_ms) and now_ms - last_persisted_at_ms < @observability_metrics_flush_interval_ms do
+      state
+    else
+      flush_observability_token_delta(state, now_ms)
+    end
+  end
+
+  defp flush_observability_token_delta(%State{} = state, now_ms \\ System.monotonic_time(:millisecond)) do
+    pending_delta = normalize_token_delta(state.observability_metrics_pending_delta)
+
+    if empty_token_delta?(pending_delta) do
+      %{state | observability_metrics_last_persisted_at_ms: now_ms}
+    else
+      :ok = ObservabilityMetrics.record_token_delta(pending_delta)
+
+      %{
+        state
+        | observability_metrics_pending_delta: @empty_token_delta,
+          observability_metrics_last_persisted_at_ms: now_ms
+      }
+    end
+  end
+
+  defp normalize_token_delta(delta) when is_map(delta) do
+    %{
+      input_tokens: Map.get(delta, :input_tokens, 0),
+      output_tokens: Map.get(delta, :output_tokens, 0),
+      total_tokens: Map.get(delta, :total_tokens, 0),
+      seconds_running: Map.get(delta, :seconds_running, 0)
+    }
+  end
+
+  defp normalize_token_delta(_delta), do: @empty_token_delta
+
+  defp empty_token_delta?(delta) do
+    delta.input_tokens == 0 and delta.output_tokens == 0 and delta.total_tokens == 0 and delta.seconds_running == 0
+  end
 
   defp apply_codex_rate_limits(%State{} = state, update) when is_map(update) do
     case extract_rate_limits(update) do
