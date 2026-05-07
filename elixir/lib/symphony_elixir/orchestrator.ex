@@ -1041,8 +1041,10 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp start_issue_task_with_lease(state, issue, attempt, recipient, worker_host, run, lease) do
+    agent_attempt = normalize_agent_attempt(attempt)
+
     case Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, fn ->
-           AgentRunner.run(issue, recipient, attempt: attempt, worker_host: worker_host)
+           AgentRunner.run(issue, recipient, attempt: agent_attempt, worker_host: worker_host)
          end) do
       {:ok, pid} ->
         ref = Process.monitor(pid)
@@ -1372,7 +1374,7 @@ defmodule SymphonyElixir.Orchestrator do
     case Reconciler.boot_action(issue, context) do
       {:relaunch, checkpoint} ->
         Logger.info("Boot reconciliation relaunching stale working issue from checkpoint: #{issue_context(issue)} checkpoint_id=#{Map.get(checkpoint, "checkpoint_id")}")
-        dispatch_issue(state, issue, %{delay_type: :boot_reconciliation}, Map.get(checkpoint, "worker_host"))
+        dispatch_issue(state, issue, nil, Map.get(checkpoint, "worker_host"))
 
       {:block, packet} ->
         Logger.warning("Boot reconciliation blocked stale working issue without safe checkpoint: #{issue_context(issue)}")
@@ -1393,7 +1395,7 @@ defmodule SymphonyElixir.Orchestrator do
       :ok ->
         _ = Store.write_resume_packet(Map.put(packet, :status, "resumed"))
         parent_issue = %{issue | state: "Rework", workpad_state: "working"}
-        dispatch_issue(state, parent_issue, %{delay_type: :parent_gate_resume}, nil)
+        dispatch_issue(state, parent_issue, nil, nil)
 
       {:error, reason} ->
         Logger.warning("Failed to move cleared parent gate to Rework: #{issue_context(issue)} reason=#{inspect(reason)}")
@@ -1484,6 +1486,9 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp normalize_retry_attempt(attempt) when is_integer(attempt) and attempt > 0, do: attempt
   defp normalize_retry_attempt(_attempt), do: 0
+
+  defp normalize_agent_attempt(attempt) when is_integer(attempt) and attempt > 0, do: attempt
+  defp normalize_agent_attempt(_attempt), do: nil
 
   defp next_retry_attempt_from_running(running_entry) do
     case Map.get(running_entry, :retry_attempt) do
