@@ -25,6 +25,8 @@ defmodule SymphonyElixir.TestSupport do
         only: [write_workflow_file!: 1, write_workflow_file!: 2, restore_env: 2, stop_default_http_server: 0]
 
       setup do
+        {:ok, _apps} = Application.ensure_all_started(:symphony_elixir)
+
         workflow_root =
           Path.join(
             System.tmp_dir!(),
