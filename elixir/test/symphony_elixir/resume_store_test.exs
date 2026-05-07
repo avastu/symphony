@@ -84,4 +84,21 @@ defmodule SymphonyElixir.ResumeStoreTest do
     assert {:ok, second_lock} = Store.acquire_scheduler_lock(60_000, %{phase: "test"})
     assert :ok = Store.release_scheduler_lock(second_lock)
   end
+
+  test "long unicode metadata truncates without breaking persisted JSON" do
+    long_unicode = String.duplicate("resume-safe-☸", 120)
+
+    assert {:ok, packet} =
+             Store.write_resume_packet(%{
+               issue_id: "issue-unicode",
+               identifier: "UTS-159",
+               status: "blocked",
+               reason: long_unicode
+             })
+
+    assert packet["reason"] =~ "... [truncated]"
+    assert String.valid?(packet["reason"])
+    assert [%{"reason" => persisted_reason}] = Store.list_resume_packets()
+    assert persisted_reason == packet["reason"]
+  end
 end

@@ -7,7 +7,7 @@ defmodule SymphonyElixir.Resume.Sanitizer do
   values, and secret-like fields before persistence.
   """
 
-  @max_string_bytes 1_000
+  @max_string_chars 1_000
   @redacted "[redacted]"
   @sensitive_key_pattern ~r/(api[_-]?key|authorization|body|cookie|dotenv|env|password|payload|private|prompt|raw|request|secret|token|tool[_-]?output|transcript)/i
   @secret_assignment_pattern ~r/(?i)\b([A-Z][A-Z0-9_]*(?:TOKEN|SECRET|KEY|PASSWORD|AUTH|COOKIE)[A-Z0-9_]*)\s*=\s*([^\s]+)/i
@@ -57,7 +57,7 @@ defmodule SymphonyElixir.Resume.Sanitizer do
   defp sanitize_value(value, _key) when is_pid(value), do: inspect(value)
   defp sanitize_value(value, _key) when is_reference(value), do: inspect(value)
   defp sanitize_value(value, _key) when is_number(value) or is_boolean(value) or is_nil(value), do: value
-  defp sanitize_value(value, _key), do: inspect(value, limit: 20, printable_limit: @max_string_bytes)
+  defp sanitize_value(value, _key), do: inspect(value, limit: 20, printable_limit: @max_string_chars)
 
   defp sensitive_key?(nil), do: false
 
@@ -77,10 +77,10 @@ defmodule SymphonyElixir.Resume.Sanitizer do
   end
 
   defp truncate_string(value) do
-    if byte_size(value) <= @max_string_bytes do
+    if String.length(value) <= @max_string_chars do
       value
     else
-      binary_part(value, 0, @max_string_bytes) <> "... [truncated]"
+      String.slice(value, 0, @max_string_chars) <> "... [truncated]"
     end
   end
 end
