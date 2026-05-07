@@ -48,6 +48,7 @@ defmodule SymphonyElixir.Linear.Client do
         }
         comments(last: 20) {
           nodes {
+            id
             body
             createdAt
             updatedAt
@@ -531,6 +532,7 @@ defmodule SymphonyElixir.Linear.Client do
       workpad_state: latest_workpad_field(issue, "State"),
       workpad_phase: latest_workpad_field(issue, "Phase"),
       review_action: latest_review_action(issue),
+      review_events: review_events(issue),
       blocked_by: extract_blockers(issue),
       labels: extract_labels(issue),
       assigned_to_worker: assigned_to_worker?(assignee, assignee_filter),
@@ -707,10 +709,25 @@ defmodule SymphonyElixir.Linear.Client do
     comments
     |> Enum.reject(&workpad_comment?/1)
     |> Enum.sort_by(&comment_updated_at_sort_key/1, :desc)
-    |> Enum.find_value(&review_action_marker/1)
+    |> Enum.find_value(fn comment ->
+      case review_action_event(comment) do
+        %{id: id} -> id
+        _ -> nil
+      end
+    end)
   end
 
   defp latest_review_action(_issue), do: nil
+
+  defp review_events(%{"comments" => %{"nodes" => comments}}) when is_list(comments) do
+    comments
+    |> Enum.reject(&workpad_comment?/1)
+    |> Enum.sort_by(&comment_updated_at_sort_key/1, :desc)
+    |> Enum.flat_map(&comment_review_events/1)
+    |> Enum.uniq_by(&Map.get(&1, :id))
+  end
+
+  defp review_events(_issue), do: []
 
   defp workpad_comment?(comment) when is_map(comment) do
     comment
@@ -720,14 +737,53 @@ defmodule SymphonyElixir.Linear.Client do
     |> String.starts_with?("## Codex Workpad")
   end
 
-  defp review_action_marker(%{"body" => body} = comment) when is_binary(body) do
-    case review_action_kind(body) do
-      nil -> nil
-      kind -> "#{kind}:#{comment_updated_at_sort_key(comment)}"
+  defp comment_review_events(%{} = comment) do
+    comment
+    |> review_marker_events()
+    |> maybe_prepend_review_action_event(comment)
+  end
+
+  defp comment_review_events(_comment), do: []
+
+  defp maybe_prepend_review_action_event(events, comment) do
+    case review_action_event(comment) do
+      nil -> events
+      event -> [event | events]
     end
   end
 
-  defp review_action_marker(_comment), do: nil
+  defp review_action_event(%{"body" => body} = comment) when is_binary(body) do
+    case review_action_kind(body) do
+      nil ->
+        nil
+
+      kind ->
+        id =
+          case comment["id"] do
+            value when is_binary(value) and value != "" -> value
+            _ -> "#{comment_updated_at_sort_key(comment)}"
+          end
+
+        %{id: "#{kind}:#{id}", kind: "human_change_request", source: "linear_comment", actionable: true}
+    end
+  end
+
+  defp review_action_event(_comment), do: nil
+
+  defp review_marker_events(%{"body" => body}) when is_binary(body) do
+    ~r/^\s*(?:Symphony\s+)?Review Event:\s*([a-zA-Z0-9_-]+):([^\s]+)(.*)$/m
+    |> Regex.scan(body)
+    |> Enum.map(fn [_line, kind, id, suffix] ->
+      %{
+        id: "#{String.downcase(kind)}:#{id}",
+        kind: String.downcase(kind),
+        source: "linear_comment",
+        actionable: !Regex.match?(~r/\b(non[-_ ]?actionable|noise|outdated|resolved|blocked|infra(?:structure)?[-_ ]?failure)\b/i, suffix)
+      }
+    end)
+  end
+
+  defp review_marker_events(_comment), do: []
 
   defp review_action_kind(body) when is_binary(body) do
     normalized = String.trim_leading(body)

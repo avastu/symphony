@@ -1221,6 +1221,17 @@ Symphony does not require first-class tracker write APIs in the orchestrator.
   non-implementation boundaries. A changed checkpoint for that boundary MUST NOT
   be converted to `Rework` unless an explicit human review/change signal is
   available.
+- `Human Review` is a durable wait boundary. A return from `Rework` to
+  `Human Review` establishes a new semantic review baseline rather than a
+  metadata diff against the old `Rework` checkpoint.
+- Review-check wakeups compare semantic actionable event IDs instead of raw
+  issue metadata. Supported trigger dimensions include PR head/checkpoint IDs,
+  unresolved actionable review-thread IDs, relevant check annotation/failure
+  IDs, and latest human change-request comment IDs. Routine `updatedAt`,
+  workpad timestamp, branch, and URL changes are not sufficient by themselves.
+- Automatic `Rework` transitions MUST include the concrete trigger kind and ID
+  in the returned reason. Rapid repeat transitions for the same trigger inside
+  the loop-guard window MUST stop dispatch and surface a human decision item.
 - If the `linear_graphql` client-side tool extension is implemented, it is still part of the agent
   toolchain rather than orchestrator business logic.
 
@@ -2003,6 +2014,16 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - Reconciliation with no running issues is a no-op
 - Normal worker exit in a continuation state schedules a short continuation retry (attempt 1)
 - Normal worker exit in `Human Review` releases the claim without scheduling continuation retry
+- Targeted `Human Review` checks establish semantic review baselines, stay quiet
+  after normal `Rework -> Human Review` returns, and dispatch rework only for a
+  new actionable review event ID.
+- Targeted `Human Review` checks suppress non-actionable noise: outdated or
+  resolved review comments, reviewer infrastructure failures without code
+  feedback, publish-path/human-action blockers, and routine Linear/workpad
+  timestamp changes.
+- Targeted `Human Review` checks apply a loop guard for rapid repeated rework
+  attempts with the same trigger ID and create a human decision item instead of
+  dispatching another worker.
 - Abnormal worker exit increments retries with 10s-based exponential backoff
 - Retry backoff cap uses configured `agent.max_retry_backoff_ms`
 - Retry queue entries include attempt, due time, identifier, and error
