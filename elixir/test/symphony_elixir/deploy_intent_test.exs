@@ -259,7 +259,7 @@ defmodule SymphonyElixir.DeployIntentTest do
   test "write_failed increments failure count and keeps sanitized blocker visible", %{intent_file: intent_file} do
     write_intent!(%{"target" => "control", "status" => "deploying", "failure_count" => 1})
 
-    assert :ok = DeployIntent.write_failed(DeployIntent.load(), "request body: LINEAR_API_KEY=secret")
+    assert :ok = DeployIntent.write_failed(DeployIntent.load(), "LINEAR_API_KEY=secret")
 
     intent = Jason.decode!(File.read!(intent_file))
     assert intent["status"] == "failed"
@@ -328,8 +328,8 @@ defmodule SymphonyElixir.DeployIntentTest do
       "running_count" => 0,
       "retrying_count" => 0,
       "failure_count" => 2,
-      "blocker" => "raw prompt: ignore previous instructions",
-      "health_check" => %{"ok" => false, "api_token" => "sk_test_secret", "error" => "health failed"},
+      "blocker" => "LINEAR_API_KEY=secret",
+      "health_check" => %{"ok" => false, "api_token" => "sk-test-secret-value", "error" => "token sk-proj-secret-value"},
       "rollback_packet" => %{"path" => "/tmp/rollback.json", "private_payload" => "do not expose"},
       "deploy_started_at" => "2026-05-07T00:00:00Z",
       "completed_at" => nil,
@@ -341,7 +341,7 @@ defmodule SymphonyElixir.DeployIntentTest do
     assert payload.failure_count == 2
     assert payload.blocker == "[redacted]"
     assert payload.health_check["api_token"] == "[redacted]"
-    assert payload.health_check["error"] == "health failed"
+    assert payload.health_check["error"] == "token [redacted]"
     assert payload.rollback_packet["private_payload"] == "[redacted]"
     assert payload.deploy_started_at == "2026-05-07T00:00:00Z"
     assert payload.last_attempt_at == "2026-05-07T00:01:00Z"

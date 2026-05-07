@@ -11,7 +11,7 @@ defmodule SymphonyElixir.DeployIntent do
     "runtime" => "redeploy-symphony"
   }
   @secret_key_pattern ~r/(authorization|cookie|credential|env|key|password|private|secret|token)/i
-  @secret_value_pattern ~r/(bearer\s+\S+|(sk|rk|xox|ghp|glpat|pat)_[A-Za-z0-9_-]{8,}|-----BEGIN\s+[A-Z ]*PRIVATE\s+KEY-----.*?-----END\s+[A-Z ]*PRIVATE\s+KEY-----)/ims
+  @secret_value_pattern ~r/([A-Z0-9_]*(AUTHORIZATION|COOKIE|CREDENTIAL|KEY|PASSWORD|PRIVATE|SECRET|TOKEN)[A-Z0-9_]*\s*=\s*\S+|bearer\s+\S+|(sk|rk|xox)[_-][A-Za-z0-9_-]{8,}|(ghp|glpat|pat)_[A-Za-z0-9_-]{8,}|-----BEGIN\s+[A-Z ]*PRIVATE\s+KEY-----.*?-----END\s+[A-Z ]*PRIVATE\s+KEY-----)/ims
   @unsafe_text_pattern ~r/(```|<untrusted|<script|raw prompt|provider transcript|request body|private payload|\.env contents?)/i
 
   @spec load() :: map() | nil
