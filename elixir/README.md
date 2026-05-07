@@ -23,6 +23,11 @@ This directory contains the current Elixir/OTP implementation of Symphony, based
 During app-server sessions, Symphony also serves a client-side `linear_graphql` tool so that repo
 skills can make raw Linear GraphQL calls.
 
+Before normal dispatch on startup, Symphony reconciles durable resume metadata. It writes sanitized
+issue-run, runner-lease, workspace-checkpoint, scheduler-lock, and resume-packet records so a
+runtime crash can relaunch from a safe boundary or visibly block unsafe work without duplicating a
+worker.
+
 If a claimed issue moves to a terminal state (`Done`, `Closed`, `Cancelled`, or `Duplicate`),
 Symphony stops the active agent for that issue and cleans up matching workspaces.
 
@@ -107,6 +112,8 @@ hooks:
 agent:
   max_concurrent_agents: 10
   max_turns: 20
+resume:
+  state_dir: ~/code/symphony-state/resume
 codex:
   command: codex app-server
 ---
@@ -132,6 +139,11 @@ Notes:
   Symphony validation.
 - `agent.max_turns` caps how many back-to-back Codex turns Symphony will run in a single agent
   invocation when a turn completes normally but the issue is still in an active state. Default: `20`.
+- `resume.state_dir` stores sanitized durable resume metadata. `resume.lease_ttl_ms`,
+  `resume.heartbeat_interval_ms`, `resume.stale_working_interval_ms`, and `resume.lock_ttl_ms`
+  tune runner leases, heartbeat cadence, stale-workpad detection, and scheduler locks.
+- Resume records must remain metadata-only: no raw Codex prompts, raw tool output, provider
+  transcripts, request bodies, `.env` contents, secret-like values, or unbounded private payloads.
 - If the Markdown body is blank, Symphony uses a default prompt template that includes the issue
   identifier, title, and body.
 - Use `hooks.after_create` to bootstrap a fresh workspace. For a Git-backed repo, you can run

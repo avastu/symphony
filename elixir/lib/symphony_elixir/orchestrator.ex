@@ -9,6 +9,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   alias SymphonyElixir.{AgentRunner, Config, DeployIntent, StatusDashboard, Tracker, Workspace}
   alias SymphonyElixir.Linear.Issue
+  alias SymphonyElixir.Resume.{Reconciler, Store}
 
   @continuation_retry_delay_ms 1_000
   @failure_retry_base_ms 10_000
@@ -71,6 +72,7 @@ defmodule SymphonyElixir.Orchestrator do
       retry_attempts: %{},
       review_checkpoints: %{},
       review_rework_triggers: %{},
+      resume_reconciled?: false,
       codex_totals: nil,
       codex_rate_limits: nil
     ]
@@ -100,7 +102,7 @@ defmodule SymphonyElixir.Orchestrator do
       codex_rate_limits: nil
     }
 
-    run_terminal_workspace_cleanup()
+    state = run_boot_reconciliation(state)
     state = schedule_tick(state, 0)
 
     {:ok, state}
@@ -186,6 +188,7 @@ defmodule SymphonyElixir.Orchestrator do
           |> maybe_put_runtime_value(:worker_host, runtime_info[:worker_host])
           |> maybe_put_runtime_value(:workspace_path, runtime_info[:workspace_path])
 
+        persist_running_checkpoint(updated_running_entry, :workspace_ready, %{runtime_info: runtime_info})
         notify_dashboard()
         {:noreply, %{state | running: Map.put(running, issue_id, updated_running_entry)}}
     end
@@ -201,6 +204,7 @@ defmodule SymphonyElixir.Orchestrator do
 
       running_entry ->
         {updated_running_entry, token_delta} = integrate_codex_update(running_entry, update)
+        persist_running_checkpoint(updated_running_entry, :codex_activity, %{codex_event: update})
 
         state =
           state
@@ -240,11 +244,14 @@ defmodule SymphonyElixir.Orchestrator do
       Logger.info("Deploy pending paused retry timer for issue_id=#{issue_id}; dispatch remains closed")
       {:noreply, release_issue_claim(state, issue_id)}
     else
-      handle_retry_issue(state, issue_id, attempt, metadata)
+      with_resume_scheduler_lock(state, issue_id, attempt, metadata, fn ->
+        handle_retry_issue(state, issue_id, attempt, metadata)
+      end)
     end
   end
 
   defp maybe_dispatch(%State{} = state) do
+    state = heartbeat_running_leases(state)
     state = reconcile_running_issues(state)
     state = %{state | pending_slot_issues: []}
 
@@ -635,6 +642,7 @@ defmodule SymphonyElixir.Orchestrator do
       %{pid: pid, ref: ref, identifier: identifier} = running_entry ->
         state = record_session_completion_totals(state, running_entry)
         worker_host = Map.get(running_entry, :worker_host)
+        close_running_resume_state(running_entry, "terminated", %{cleanup_workspace: cleanup_workspace})
 
         if cleanup_workspace do
           cleanup_issue_workspace(identifier, worker_host)
@@ -799,6 +807,7 @@ defmodule SymphonyElixir.Orchestrator do
       !issue_blocked?(issue, terminal_states) and
       !MapSet.member?(claimed, issue.id) and
       !Map.has_key?(running, issue.id) and
+      durable_issue_dispatch_available?(issue) and
       !is_nil(slot_wait_reason(issue, state))
   end
 
@@ -826,6 +835,9 @@ defmodule SymphonyElixir.Orchestrator do
       !worker_slots_available?(state) ->
         "worker host limit reached"
 
+      !durable_issue_dispatch_available?(issue) ->
+        "durable resume lease or blocked resume packet is active"
+
       true ->
         nil
     end
@@ -841,6 +853,7 @@ defmodule SymphonyElixir.Orchestrator do
       !issue_blocked?(issue, terminal_states) and
       !MapSet.member?(claimed, issue.id) and
       !Map.has_key?(running, issue.id) and
+      durable_issue_dispatch_available?(issue) and
       available_slots(state) > 0 and
       state_slots_available?(issue, running) and
       worker_slots_available?(state)
@@ -1003,13 +1016,42 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp spawn_issue_on_worker_host(%State{} = state, issue, attempt, recipient, worker_host) do
+    if durable_issue_dispatch_available?(issue) do
+      case Store.create_run_and_lease(issue,
+             attempt: normalize_retry_attempt(attempt),
+             worker_host: worker_host
+           ) do
+        {:ok, %{run: run, lease: lease}} ->
+          start_issue_task_with_lease(state, issue, attempt, recipient, worker_host, run, lease)
+
+        {:error, reason} ->
+          Logger.error("Unable to persist resume lease before dispatch for #{issue_context(issue)}: #{inspect(reason)}")
+
+          schedule_issue_retry(state, issue.id, nil, %{
+            identifier: issue.identifier,
+            project_label: Issue.project_label(issue),
+            error: "failed to persist resume lease: #{inspect(reason)}",
+            worker_host: worker_host
+          })
+      end
+    else
+      Logger.info("Skipping dispatch because durable resume state already owns #{issue_context(issue)}")
+      state
+    end
+  end
+
+  defp start_issue_task_with_lease(state, issue, attempt, recipient, worker_host, run, lease) do
+    agent_attempt = normalize_agent_attempt(attempt)
+
     case Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, fn ->
-           AgentRunner.run(issue, recipient, attempt: attempt, worker_host: worker_host)
+           AgentRunner.run(issue, recipient, attempt: agent_attempt, worker_host: worker_host)
          end) do
       {:ok, pid} ->
         ref = Process.monitor(pid)
 
-        Logger.info("Dispatching issue to agent: #{issue_context(issue)} pid=#{inspect(pid)} attempt=#{inspect(attempt)} worker_host=#{worker_host || "local"}")
+        Logger.info(
+          "Dispatching issue to agent: #{issue_context(issue)} pid=#{inspect(pid)} attempt=#{inspect(attempt)} worker_host=#{worker_host || "local"} run_id=#{Map.get(run, "run_id")} lease_id=#{Map.get(lease, "lease_id")}"
+        )
 
         running =
           Map.put(state.running, issue.id, %{
@@ -1017,6 +1059,9 @@ defmodule SymphonyElixir.Orchestrator do
             ref: ref,
             identifier: issue.identifier,
             issue: issue,
+            run_id: Map.get(run, "run_id"),
+            lease_id: Map.get(lease, "lease_id"),
+            session_key: Map.get(run, "session_key"),
             worker_host: worker_host,
             workspace_path: nil,
             session_id: nil,
@@ -1043,6 +1088,8 @@ defmodule SymphonyElixir.Orchestrator do
         }
 
       {:error, reason} ->
+        _ = Store.close_runner_lease(Map.get(lease, "lease_id"), "spawn_failed", %{error: inspect(reason)})
+        _ = Store.update_issue_run(issue.id, Map.get(run, "run_id"), %{lifecycle_state: "spawn_failed"})
         Logger.error("Unable to spawn agent for #{issue_context(issue)}: #{inspect(reason)}")
         next_attempt = if is_integer(attempt), do: attempt + 1, else: nil
 
@@ -1203,7 +1250,7 @@ defmodule SymphonyElixir.Orchestrator do
     {:noreply, release_issue_claim(state, issue_id)}
   end
 
-  defp cleanup_issue_workspace(identifier, worker_host \\ nil)
+  defp cleanup_issue_workspace(identifier, worker_host)
 
   defp cleanup_issue_workspace(identifier, worker_host) when is_binary(identifier) do
     Workspace.remove_issue_workspaces(identifier, worker_host)
@@ -1211,21 +1258,188 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp cleanup_issue_workspace(_identifier, _worker_host), do: :ok
 
-  defp run_terminal_workspace_cleanup do
-    case Tracker.fetch_issues_by_states(Config.settings!().tracker.terminal_states) do
-      {:ok, issues} ->
-        issues
-        |> Enum.each(fn
-          %Issue{identifier: identifier} when is_binary(identifier) ->
-            cleanup_issue_workspace(identifier)
+  defp run_boot_reconciliation(%State{} = state) do
+    resume = Config.settings!().resume
 
-          _ ->
-            :ok
-        end)
+    case Store.with_scheduler_lock(resume.lock_ttl_ms, %{phase: "boot_reconciliation"}, fn _lock ->
+           do_run_boot_reconciliation(state)
+         end) do
+      {:ok, %State{} = reconciled_state} ->
+        %{reconciled_state | resume_reconciled?: true}
+
+      {:error, :locked} ->
+        Logger.info("Skipping boot reconciliation because another scheduler lock is active")
+        state
 
       {:error, reason} ->
-        Logger.warning("Skipping startup terminal workspace cleanup; failed to fetch terminal issues: #{inspect(reason)}")
+        Logger.warning("Skipping boot reconciliation because resume lock failed: #{inspect(reason)}")
+        state
     end
+  end
+
+  defp do_run_boot_reconciliation(%State{} = state) do
+    intent = DeployIntent.load()
+
+    if DeployIntent.active?(intent) do
+      Logger.info("Deploy pending is active during boot reconciliation; dispatch remains closed: #{DeployIntent.summary(intent)}")
+      state
+    else
+      log_boot_runtime_verification()
+      {:ok, _expired} = Store.expire_stale_leases()
+
+      case fetch_boot_reconciliation_issues() do
+        {:ok, issues} ->
+          reconcile_boot_issues(state, issues)
+
+        {:error, reason} ->
+          Logger.warning("Boot reconciliation could not list Linear issues: #{inspect(reason)}")
+          state
+      end
+    end
+  end
+
+  defp fetch_boot_reconciliation_issues do
+    with {:ok, active_issues} <- Tracker.fetch_candidate_issues(),
+         {:ok, review_issues} <- fetch_review_issues() do
+      {:ok, dedupe_issues(active_issues ++ review_issues)}
+    end
+  end
+
+  defp reconcile_boot_issues(%State{} = state, issues) when is_list(issues) do
+    context = boot_reconciliation_context(state, issues)
+
+    Enum.reduce(issues, state, fn
+      %Issue{} = issue, state_acc ->
+        handle_boot_reconciliation_issue(state_acc, issue, context)
+
+      _issue, state_acc ->
+        state_acc
+    end)
+  end
+
+  defp dedupe_issues(issues) when is_list(issues) do
+    issues
+    |> Enum.reduce({MapSet.new(), []}, fn
+      %Issue{id: id} = issue, {seen, acc} when is_binary(id) ->
+        if MapSet.member?(seen, id) do
+          {seen, acc}
+        else
+          {MapSet.put(seen, id), [issue | acc]}
+        end
+
+      _issue, state ->
+        state
+    end)
+    |> elem(1)
+    |> Enum.reverse()
+  end
+
+  defp boot_reconciliation_context(%State{} = state, issues) do
+    now = DateTime.utc_now()
+
+    active_lease_issue_ids =
+      Store.list_runner_leases()
+      |> Enum.filter(&(Store.open_lease?(&1) and not Store.lease_expired?(&1, now)))
+      |> Enum.flat_map(fn
+        %{"issue_id" => issue_id} when is_binary(issue_id) -> [issue_id]
+        _lease -> []
+      end)
+      |> MapSet.new()
+
+    latest_checkpoints =
+      issues
+      |> Enum.flat_map(fn
+        %Issue{id: issue_id} when is_binary(issue_id) ->
+          case Store.latest_workspace_checkpoint(issue_id) do
+            %{} = checkpoint -> [{issue_id, checkpoint}]
+            _ -> []
+          end
+
+        _issue ->
+          []
+      end)
+      |> Map.new()
+
+    %{
+      now: now,
+      running_issue_ids: state.running |> Map.keys() |> MapSet.new(),
+      active_lease_issue_ids: active_lease_issue_ids,
+      latest_checkpoints: latest_checkpoints,
+      stale_interval_ms: Config.settings!().resume.stale_working_interval_ms,
+      terminal_states: MapSet.put(terminal_state_set(), "merged")
+    }
+  end
+
+  defp handle_boot_reconciliation_issue(%State{} = state, %Issue{} = issue, context) do
+    case Reconciler.boot_action(issue, context) do
+      {:relaunch, checkpoint} ->
+        Logger.info("Boot reconciliation relaunching stale working issue from checkpoint: #{issue_context(issue)} checkpoint_id=#{Map.get(checkpoint, "checkpoint_id")}")
+        dispatch_issue(state, issue, nil, Map.get(checkpoint, "worker_host"))
+
+      {:block, packet} ->
+        Logger.warning("Boot reconciliation blocked stale working issue without safe checkpoint: #{issue_context(issue)}")
+        write_resume_packet_comment(issue, packet)
+        release_issue_claim(state, issue.id)
+
+      {:resume_parent, packet} ->
+        resume_parent_after_child_gate(state, issue, packet)
+
+      _ ->
+        state
+    end
+  end
+
+  defp resume_parent_after_child_gate(%State{} = state, %Issue{id: issue_id} = issue, packet)
+       when is_binary(issue_id) do
+    case Tracker.update_issue_state(issue_id, "Rework") do
+      :ok ->
+        _ = Store.write_resume_packet(Map.put(packet, :status, "resumed"))
+        parent_issue = %{issue | state: "Rework", workpad_state: "working"}
+        dispatch_issue(state, parent_issue, nil, nil)
+
+      {:error, reason} ->
+        Logger.warning("Failed to move cleared parent gate to Rework: #{issue_context(issue)} reason=#{inspect(reason)}")
+        write_resume_packet_comment(issue, Map.merge(packet, %{status: "blocked", error: inspect(reason)}))
+        release_issue_claim(state, issue_id)
+    end
+  end
+
+  defp resume_parent_after_child_gate(%State{} = state, _issue, _packet), do: state
+
+  defp write_resume_packet_comment(%Issue{} = issue, packet) do
+    case Store.write_resume_packet(packet) do
+      {:ok, persisted_packet} ->
+        _ = Tracker.create_comment(issue.id, resume_packet_comment(issue, persisted_packet))
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("Failed to write resume packet for #{issue_context(issue)}: #{inspect(reason)}")
+        :ok
+    end
+  end
+
+  defp resume_packet_comment(%Issue{} = issue, packet) do
+    """
+    ## Symphony Resume Packet
+
+    Issue: #{issue.identifier || issue.id}
+    Status: #{Map.get(packet, "status")}
+    Reason: #{Map.get(packet, "reason")}
+
+    Resume instruction: #{Map.get(packet, "resume_instruction")}
+
+    This packet contains sanitized metadata only. Review the `## Codex Workpad` and workspace before retrying non-idempotent work.
+    """
+    |> String.trim()
+  end
+
+  defp log_boot_runtime_verification do
+    runtime_path = File.cwd!()
+    workflow_path = SymphonyElixir.Workflow.workflow_file_path()
+    runtime_commit = current_git_commit(runtime_path)
+    deploy_intent_path = DeployIntent.path()
+
+    Logger.info("Boot reconciliation verified runtime_path=#{runtime_path} workflow_path=#{workflow_path} runtime_commit=#{runtime_commit || "unknown"} deploy_intent_path=#{deploy_intent_path}")
   end
 
   defp notify_dashboard do
@@ -1272,6 +1486,9 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp normalize_retry_attempt(attempt) when is_integer(attempt) and attempt > 0, do: attempt
   defp normalize_retry_attempt(_attempt), do: 0
+
+  defp normalize_agent_attempt(attempt) when is_integer(attempt) and attempt > 0, do: attempt
+  defp normalize_agent_attempt(_attempt), do: nil
 
   defp next_retry_attempt_from_running(running_entry) do
     case Map.get(running_entry, :retry_attempt) do
@@ -1701,6 +1918,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp handle_agent_down_reason(state, issue_id, running_entry, session_id, :normal) do
+    close_running_resume_state(running_entry, "completed", %{session_id: session_id})
     state = complete_issue(state, issue_id)
 
     if continuation_issue?(running_entry.issue) do
@@ -1722,6 +1940,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp handle_agent_down_reason(state, issue_id, running_entry, session_id, reason) do
+    close_running_resume_state(running_entry, "crashed", %{session_id: session_id, error: inspect(reason)})
     Logger.warning("Agent task exited for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}; scheduling retry")
 
     next_attempt = next_retry_attempt_from_running(running_entry)
@@ -1748,6 +1967,7 @@ defmodule SymphonyElixir.Orchestrator do
     review_trigger = review_trigger_change(previous_checkpoint, checkpoint)
 
     state = %{state | review_checkpoints: Map.put(state.review_checkpoints, issue_id, checkpoint)}
+    persist_review_checkpoint(issue, checkpoint)
     terminal_states = terminal_state_set()
 
     cond do
@@ -1813,6 +2033,9 @@ defmodule SymphonyElixir.Orchestrator do
           release_issue_claim(state, issue_id)
         }
 
+      parent_child_gate_cleared?(issue) ->
+        transition_cleared_parent_gate_to_rework(state, issue)
+
       workpad_blocked?(issue) ->
         {
           %{
@@ -1848,6 +2071,74 @@ defmodule SymphonyElixir.Orchestrator do
             issue_identifier: issue.identifier,
             reason: "review_checkpoint_unchanged",
             operations: ["review_check"]
+          },
+          release_issue_claim(state, issue_id)
+        }
+    end
+  end
+
+  defp parent_child_gate_cleared?(%Issue{} = issue) do
+    Reconciler.cleared_parent_gate?(issue, %{
+      terminal_states: MapSet.put(terminal_state_set(), "merged"),
+      parent_gate_states: ["human review", "in review"]
+    })
+  end
+
+  defp transition_cleared_parent_gate_to_rework(%State{} = state, %Issue{id: issue_id} = issue)
+       when is_binary(issue_id) do
+    packet =
+      %{
+        issue_id: issue.id,
+        identifier: issue.identifier,
+        status: "resume_parent",
+        reason: "child_gate_cleared",
+        linear_state: issue.state,
+        workpad_state: issue.workpad_state,
+        resume_instruction: "Move the parent control issue back to Rework and continue the parent only; do not start duplicate child work."
+      }
+
+    case Tracker.update_issue_state(issue_id, "Rework") do
+      :ok ->
+        _ = Store.write_resume_packet(Map.put(packet, :status, "resumed"))
+        rework_issue = %{issue | state: "Rework", workpad_state: "working"}
+
+        if dispatch_slots_available?(rework_issue, state) do
+          {
+            %{
+              queued: true,
+              coalesced: false,
+              issue_id: issue_id,
+              issue_identifier: issue.identifier,
+              reason: "child_gate_cleared",
+              operations: ["review_check", "state:Rework", "dispatch", "parent_gate_cleared"]
+            },
+            dispatch_issue(state, rework_issue, %{delay_type: :parent_gate_resume}, nil)
+          }
+        else
+          {
+            %{
+              queued: false,
+              coalesced: false,
+              issue_id: issue_id,
+              issue_identifier: issue.identifier,
+              reason: "child_gate_cleared_no_capacity",
+              operations: ["review_check", "state:Rework", "parent_gate_cleared"]
+            },
+            release_issue_claim(state, issue_id)
+          }
+        end
+
+      {:error, reason} ->
+        Logger.warning("Failed to move cleared parent gate to Rework: #{issue_context(issue)} reason=#{inspect(reason)}")
+
+        {
+          %{
+            queued: false,
+            coalesced: false,
+            issue_id: issue_id,
+            issue_identifier: issue.identifier,
+            reason: "parent_gate_transition_failed: #{inspect(reason)}",
+            operations: ["review_check", "parent_gate_cleared"]
           },
           release_issue_claim(state, issue_id)
         }
@@ -2211,8 +2502,239 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp human_review_state?(_state_name), do: false
 
+  defp durable_issue_dispatch_available?(%Issue{id: issue_id}) when is_binary(issue_id) do
+    !Store.open_lease_for_issue?(issue_id) and !Store.blocked_resume_packet_for_issue?(issue_id)
+  end
+
+  defp durable_issue_dispatch_available?(_issue), do: false
+
+  defp with_resume_scheduler_lock(%State{} = state, issue_id, attempt, metadata, fun)
+       when is_binary(issue_id) and is_integer(attempt) and is_map(metadata) and is_function(fun, 0) do
+    resume = Config.settings!().resume
+
+    case Store.with_scheduler_lock(resume.lock_ttl_ms, %{phase: "resume_retry", issue_id: issue_id}, fn _lock ->
+           fun.()
+         end) do
+      {:ok, result} ->
+        result
+
+      {:error, :locked} ->
+        {:noreply,
+         schedule_issue_retry(
+           state,
+           issue_id,
+           attempt + 1,
+           Map.merge(metadata, %{error: "resume scheduler lock held"})
+         )}
+
+      {:error, reason} ->
+        {:noreply,
+         schedule_issue_retry(
+           state,
+           issue_id,
+           attempt + 1,
+           Map.merge(metadata, %{error: "resume scheduler lock failed: #{inspect(reason)}"})
+         )}
+    end
+  end
+
+  defp heartbeat_running_leases(%State{} = state) do
+    Enum.each(state.running, fn {_issue_id, running_entry} ->
+      case Map.get(running_entry, :lease_id) do
+        lease_id when is_binary(lease_id) ->
+          _ = Store.heartbeat_runner_lease(lease_id, heartbeat_metadata(running_entry))
+
+        _ ->
+          :ok
+      end
+    end)
+
+    state
+  end
+
+  defp persist_running_checkpoint(running_entry, phase, metadata) when is_map(running_entry) do
+    case running_entry_checkpoint(running_entry, phase, metadata) do
+      %{} = checkpoint ->
+        with {:ok, persisted} <- Store.put_workspace_checkpoint(checkpoint),
+             run_id when is_binary(run_id) <- Map.get(running_entry, :run_id),
+             issue_id when is_binary(issue_id) <- get_in(running_entry, [:issue, Access.key(:id)]) do
+          update_run_checkpoint(issue_id, run_id, persisted)
+          heartbeat_running_lease(running_entry)
+          :ok
+        else
+          {:error, reason} ->
+            Logger.warning("Failed to persist workspace checkpoint: #{inspect(reason)}")
+
+          _ ->
+            :ok
+        end
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp persist_running_checkpoint(_running_entry, _phase, _metadata), do: :ok
+
+  defp update_run_checkpoint(issue_id, run_id, persisted) do
+    _ =
+      Store.update_issue_run(issue_id, run_id, %{
+        latest_checkpoint_id: Map.get(persisted, "checkpoint_id"),
+        workspace_path: Map.get(persisted, "workspace_path")
+      })
+
+    :ok
+  end
+
+  defp heartbeat_running_lease(running_entry) do
+    case Map.get(running_entry, :lease_id) do
+      lease_id when is_binary(lease_id) ->
+        _ = Store.heartbeat_runner_lease(lease_id, heartbeat_metadata(running_entry))
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp persist_review_checkpoint(%Issue{} = issue, checkpoint) when is_map(checkpoint) do
+    _ =
+      Store.put_workspace_checkpoint(%{
+        record_type: "WorkspaceCheckpoint",
+        issue_id: issue.id,
+        identifier: issue.identifier,
+        phase_boundary: "review_check",
+        workpad_snapshot: %{
+          state: issue.workpad_state,
+          phase: issue.workpad_phase,
+          linear_state: issue.state,
+          updated_at: issue.updated_at
+        },
+        review_checkpoint: checkpoint,
+        safe_to_resume: false,
+        non_idempotent_retry_requires_review: true,
+        resume_instruction: "Stable review checkpoints are parked until a material review trigger appears."
+      })
+
+    :ok
+  end
+
+  defp close_running_resume_state(running_entry, status, metadata) when is_map(running_entry) do
+    lease_id = Map.get(running_entry, :lease_id)
+    run_id = Map.get(running_entry, :run_id)
+    issue_id = get_in(running_entry, [:issue, Access.key(:id)])
+
+    if is_binary(lease_id) do
+      _ = Store.close_runner_lease(lease_id, status, metadata)
+    end
+
+    if is_binary(issue_id) and is_binary(run_id) do
+      _ = Store.update_issue_run(issue_id, run_id, %{lifecycle_state: status})
+    end
+
+    :ok
+  end
+
+  defp close_running_resume_state(_running_entry, _status, _metadata), do: :ok
+
+  defp running_entry_checkpoint(%{issue: %Issue{} = issue} = running_entry, phase, metadata) do
+    %{
+      record_type: "WorkspaceCheckpoint",
+      issue_id: issue.id,
+      identifier: issue.identifier,
+      run_id: Map.get(running_entry, :run_id),
+      lease_id: Map.get(running_entry, :lease_id),
+      session_key: Map.get(running_entry, :session_key),
+      worker_host: Map.get(running_entry, :worker_host),
+      workspace_path: Map.get(running_entry, :workspace_path),
+      phase_boundary: to_string(phase),
+      codex_thread_id: Map.get(running_entry, :session_id),
+      codex_app_server_pid: Map.get(running_entry, :codex_app_server_pid),
+      turn_count: Map.get(running_entry, :turn_count, 0),
+      latest_event: Map.get(running_entry, :last_codex_event),
+      latest_message_summary: StatusDashboard.humanize_codex_message(Map.get(running_entry, :last_codex_message)),
+      workpad_snapshot: %{
+        state: issue.workpad_state,
+        phase: issue.workpad_phase,
+        linear_state: issue.state,
+        updated_at: issue.updated_at
+      },
+      routed_repos: workspace_repo_summaries(Map.get(running_entry, :workspace_path)),
+      safe_to_resume: true,
+      non_idempotent_retry_requires_review: false,
+      resume_instruction: "Resume in the existing workspace from this checkpoint; do not delete or reset dirty changes.",
+      metadata: metadata
+    }
+  end
+
+  defp running_entry_checkpoint(_running_entry, _phase, _metadata), do: nil
+
+  defp heartbeat_metadata(running_entry) when is_map(running_entry) do
+    %{
+      worker_host: Map.get(running_entry, :worker_host),
+      workspace_path: Map.get(running_entry, :workspace_path),
+      codex_thread_id: Map.get(running_entry, :session_id),
+      codex_app_server_pid: Map.get(running_entry, :codex_app_server_pid),
+      turn_count: Map.get(running_entry, :turn_count, 0),
+      latest_event: Map.get(running_entry, :last_codex_event)
+    }
+  end
+
+  defp workspace_repo_summaries(nil), do: []
+
+  defp workspace_repo_summaries(workspace_path) when is_binary(workspace_path) do
+    if File.dir?(workspace_path) do
+      child_repos =
+        workspace_path
+        |> File.ls!()
+        |> Enum.map(&Path.join(workspace_path, &1))
+        |> Enum.filter(&(File.dir?(&1) and File.dir?(Path.join(&1, ".git"))))
+
+      root_repos =
+        if File.dir?(Path.join(workspace_path, ".git")), do: [workspace_path], else: []
+
+      (root_repos ++ child_repos)
+      |> Enum.uniq()
+      |> Enum.map(&git_workspace_summary/1)
+    else
+      []
+    end
+  rescue
+    _error -> []
+  end
+
+  defp git_workspace_summary(repo_path) do
+    %{
+      repo: Path.basename(repo_path),
+      branch: git_output(repo_path, ["branch", "--show-current"]),
+      head: git_output(repo_path, ["rev-parse", "--short", "HEAD"]),
+      dirty: git_dirty?(repo_path)
+    }
+  end
+
+  defp git_dirty?(repo_path) do
+    case git_output(repo_path, ["status", "--porcelain"]) do
+      "" -> false
+      output when is_binary(output) -> true
+      _ -> nil
+    end
+  end
+
+  defp current_git_commit(path) when is_binary(path) do
+    git_output(path, ["rev-parse", "--short", "HEAD"])
+  end
+
+  defp git_output(repo_path, args) when is_binary(repo_path) and is_list(args) do
+    case System.cmd("git", args, cd: repo_path, stderr_to_stdout: true) do
+      {output, 0} -> String.trim(output)
+      _ -> nil
+    end
+  rescue
+    _error -> nil
+  end
+
   defp dispatch_slots_available?(%Issue{} = issue, %State{} = state) do
-    available_slots(state) > 0 and state_slots_available?(issue, state.running)
+    available_slots(state) > 0 and state_slots_available?(issue, state.running) and
+      durable_issue_dispatch_available?(issue)
   end
 
   defp apply_codex_token_delta(

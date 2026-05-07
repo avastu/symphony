@@ -40,6 +40,12 @@ agent:
     Merging: 1
   max_turns: 20
   max_retry_backoff_ms: 300000
+resume:
+  state_dir: ~/code/symphony-state/resume
+  lease_ttl_ms: 600000
+  heartbeat_interval_ms: 30000
+  stale_working_interval_ms: 600000
+  lock_ttl_ms: 60000
 codex:
   command: codex --config shell_environment_policy.inherit=all --config 'model="gpt-5.5"' --config model_reasoning_effort=xhigh app-server
   approval_policy: never

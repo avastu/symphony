@@ -1,6 +1,8 @@
 defmodule SymphonyElixir.CoreTest do
   use SymphonyElixir.TestSupport
 
+  alias SymphonyElixir.Resume.Store
+
   test "config defaults and validation checks" do
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_api_token: nil,
@@ -19,6 +21,10 @@ defmodule SymphonyElixir.CoreTest do
     assert config.tracker.terminal_states == ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]
     assert config.tracker.assignee == nil
     assert config.agent.max_turns == 20
+    assert config.resume.lease_ttl_ms == 600_000
+    assert config.resume.heartbeat_interval_ms == 30_000
+    assert config.resume.stale_working_interval_ms == 600_000
+    assert config.resume.lock_ttl_ms == 60_000
 
     write_workflow_file!(Workflow.workflow_file_path(), poll_interval_ms: "invalid")
 
@@ -1241,6 +1247,72 @@ defmodule SymphonyElixir.CoreTest do
       refute MapSet.member?(updated_state.claimed, "issue-uts-99")
       assert updated_state.review_checkpoints["issue-uts-99"].state == "Human Review"
       assert updated_state.review_checkpoints["issue-uts-99"].workpad_state == "blocked"
+    after
+      restore_app_env(:memory_tracker_issues, previous_memory_issues)
+      restore_app_env(:memory_tracker_recipient, previous_memory_recipient)
+    end
+  end
+
+  test "targeted Human Review check resumes blocked parent after child gate clears" do
+    previous_memory_issues = Application.get_env(:symphony_elixir, :memory_tracker_issues)
+    previous_memory_recipient = Application.get_env(:symphony_elixir, :memory_tracker_recipient)
+
+    issue = %Issue{
+      id: "issue-uts-99-parent",
+      identifier: "UTS-99",
+      title: "Project cockpit parked behind child issue",
+      state: "Human Review",
+      workpad_state: "blocked",
+      blocked_by: [%{id: "issue-uts-159", identifier: "UTS-159", state: "Done"}],
+      updated_at: ~U[2026-05-07 08:00:00Z],
+      branch_name: "uts-99-project-control",
+      url: "https://linear.app/issue/UTS-99"
+    }
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+      Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+      {:ok, _lease} =
+        Store.put_runner_lease(%{
+          issue_id: "issue-uts-99-parent",
+          identifier: "UTS-99",
+          lease_id: "lease-parent",
+          run_id: "run-parent",
+          status: "active",
+          expires_at: DateTime.add(DateTime.utc_now(), 60, :second) |> DateTime.to_iso8601()
+        })
+
+      state = %Orchestrator.State{
+        poll_interval_ms: 30_000,
+        max_concurrent_agents: 1,
+        running: %{
+          "issue-other" => %{
+            issue: %Issue{id: "issue-other", identifier: "UTS-200", state: "Rework"}
+          }
+        },
+        claimed: MapSet.new(["issue-uts-99-parent"]),
+        review_checkpoints: %{
+          "issue-uts-99-parent" => %{
+            state: "Human Review",
+            workpad_state: "blocked",
+            updated_at: ~U[2026-05-07 07:55:00Z]
+          }
+        },
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+        codex_rate_limits: nil
+      }
+
+      assert {:reply, payload, updated_state} =
+               Orchestrator.handle_call({:request_review_check, "issue-uts-99-parent"}, {self(), make_ref()}, state)
+
+      assert payload.queued == false
+      assert payload.reason == "child_gate_cleared_no_capacity"
+      assert payload.operations == ["review_check", "state:Rework", "parent_gate_cleared"]
+      assert_receive {:memory_tracker_state_update, "issue-uts-99-parent", "Rework"}
+      refute_receive {:memory_tracker_state_update, "issue-uts-159", "Rework"}, 50
+      refute MapSet.member?(updated_state.claimed, "issue-uts-99-parent")
     after
       restore_app_env(:memory_tracker_issues, previous_memory_issues)
       restore_app_env(:memory_tracker_recipient, previous_memory_recipient)
